@@ -123,8 +123,10 @@ async def on_ready():
                                 print(f"\n    [DEBUG EMBED #{embeds_seen}] from {message.author} in #{label}")
                                 print(f"      Title:       {embed.title!r}")
                                 print(f"      Description: {embed.description!r}")
-                                print(f"      Footer:      {embed.footer.text!r if embed.footer else None}")
-                                print(f"      Author:      {embed.author.name!r if embed.author else None}")
+                                footer_val = embed.footer.text if embed.footer else None
+                                author_val = embed.author.name if embed.author else None
+                                print(f"      Footer:      {footer_val!r}")
+                                print(f"      Author:      {author_val!r}")
                                 print(f"      Fields:      {[(f.name, f.value) for f in embed.fields]}")
                             parsed = parse_embed(embed)
                             if parsed:
