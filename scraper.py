@@ -135,15 +135,18 @@ def parse_quote_from_message(msg):
             break
 
     # Extract quote text, author, and added_by from embed description.
-    # Format from the old bot (all in embed description):
+    # Actual format from the old bot (embed description):
     #
-    #   Brissett (2025 never left Patriots org) > Brady (now) > Jimmy G (Life)
+    #   > Quote text here
+    #   >
+    #   > - 🗣 Author
     #
-    #   - 🗣 Milz
-    #
-    #   Added by Don Juan#1523
+    #   Added by Username#1234
     #   ✍ at 2022-05-07 12:07:30.023561 🕑 !
     #   QuoteID: 359 ✏
+    #
+    # The quote text and author are inside a blockquote (> prefixed lines).
+    # Metadata (Added by, timestamp, QuoteID) is outside the blockquote.
     #
     quote_text = None
     quote_author = None
@@ -155,52 +158,59 @@ def parse_quote_from_message(msg):
         if not desc:
             continue
 
-        # Debug: print raw description for first few quotes
-        if old_id and old_id <= 3:
+        # Debug: always print raw description for first 5 IDs
+        if old_id and old_id <= 5:
             print("  [RAW DESC for ID %d]:" % old_id)
-            print("    %r" % desc)
+            for dl in desc.split("\n"):
+                print("    | %r" % dl)
             print("")
 
-        # Split the description using "Added by" as the main delimiter.
-        # Everything before "Added by" contains the quote + author.
-        # Everything from "Added by" onward is metadata.
-        parts = re.split(r"(?=Added by\s)", desc, maxsplit=1, flags=re.IGNORECASE)
-        quote_section = parts[0].strip()
-        metadata_section = parts[1].strip() if len(parts) > 1 else ""
+        # Separate blockquoted lines (quote content) from non-blockquoted (metadata)
+        blockquote_lines = []
+        metadata_lines = []
 
-        # From the metadata section, extract Added by, timestamp, QuoteID
-        if metadata_section:
-            m = re.match(r"Added by\s+(.+?)(?:\n|$)", metadata_section, re.IGNORECASE)
-            if m:
-                added_by = m.group(1).strip()
+        for line in desc.split("\n"):
+            if line.startswith("> ") or line == ">":
+                # Strip the "> " prefix
+                blockquote_lines.append(line[2:] if line.startswith("> ") else "")
+            else:
+                metadata_lines.append(line)
 
-            m = re.search(r"at\s+([\d-]+\s+[\d:.]+)", metadata_section)
-            if m:
-                quote_timestamp = m.group(1).strip()
+        # If no blockquote found, fall back to splitting on "Added by"
+        if not blockquote_lines:
+            parts = re.split(r"(?=Added by\s)", desc, maxsplit=1, flags=re.IGNORECASE)
+            blockquote_lines = parts[0].strip().split("\n")
+            if len(parts) > 1:
+                metadata_lines = parts[1].strip().split("\n")
 
-        # From the quote section, split quote text and author.
-        # Author is on a line starting with "- " or "– " (usually last non-empty line)
-        lines = quote_section.split("\n")
-
-        # Work backwards to find the author line
+        # Parse the blockquote: quote text + author
         q_lines = []
-        for i in range(len(lines) - 1, -1, -1):
-            stripped = lines[i].strip()
+        for line in blockquote_lines:
+            stripped = line.strip()
             if not stripped:
                 continue
-            if quote_author is None and re.match(r"^[-\u2013\u2014~]\s+", stripped):
+            # Author line starts with - or – or —
+            if re.match(r"^[-\u2013\u2014~]\s+", stripped):
                 quote_author = re.sub(r"^[-\u2013\u2014~]\s+", "", stripped).strip()
             else:
-                q_lines.insert(0, stripped)
+                q_lines.append(stripped)
 
         if q_lines:
             quote_text = "\n".join(q_lines).strip()
             # Remove surrounding quote marks
             quote_text = re.sub(r'^["""\u201c]|["""\u201d]$', "", quote_text).strip()
-            # Remove blockquote markers
-            quote_text = re.sub(r"^>\s*", "", quote_text, flags=re.MULTILINE).strip()
 
-        # Only need to parse the first embed with content
+        # Parse metadata lines for Added by, timestamp, QuoteID
+        metadata_text = "\n".join(metadata_lines)
+
+        m = re.search(r"Added by\s+(.+?)(?:\n|$)", metadata_text, re.IGNORECASE)
+        if m:
+            added_by = m.group(1).strip()
+
+        m = re.search(r"at\s+([\d-]+\s+[\d:.]+)", metadata_text)
+        if m:
+            quote_timestamp = m.group(1).strip()
+
         if quote_text or quote_author:
             break
 
