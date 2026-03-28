@@ -105,8 +105,15 @@ async def on_ready():
 
             for source in sources:
                 label = f"{channel.name}/{source.name}" if source != channel else channel.name
+                msg_count = 0
                 try:
                     async for message in source.history(limit=None, oldest_first=True, before=cutoff):
+                        msg_count += 1
+                        if msg_count % 500 == 0:
+                            print(f"\r  Scanning #{label}... {msg_count} messages scanned, {count} quotes found so far", end="", flush=True)
+                        # Only check messages that have embeds
+                        if not message.embeds:
+                            continue
                         for embed in message.embeds:
                             parsed = parse_embed(embed)
                             if parsed:
@@ -120,7 +127,7 @@ async def on_ready():
                     print(f" (error in {label}: {e})")
                     continue
 
-            print(f" found {count} quotes")
+            print(f"\r  Scanning #{channel.name}... done! {msg_count} messages, {count} quotes found")
 
     # Sort by old ID if available, otherwise by order found
     all_quotes.sort(key=lambda q: q["old_id"] or 0)
