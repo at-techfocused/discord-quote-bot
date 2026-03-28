@@ -95,21 +95,30 @@ async def on_ready():
             print(f"  Scanning #{channel.name}...", end="", flush=True)
             count = 0
 
+            # Scan the main channel and its archived threads
+            sources = [channel]
             try:
-                async for message in channel.history(limit=None, oldest_first=True, before=cutoff):
-                    for embed in message.embeds:
-                        parsed = parse_embed(embed)
-                        if parsed:
-                            parsed["channel"] = channel.name
-                            parsed["message_url"] = message.jump_url
-                            all_quotes.append(parsed)
-                            count += 1
-            except discord.Forbidden:
-                print(" (forbidden)")
-                continue
-            except Exception as e:
-                print(f" (error: {e})")
-                continue
+                async for thread in channel.archived_threads(limit=None):
+                    sources.append(thread)
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+
+            for source in sources:
+                label = f"{channel.name}/{source.name}" if source != channel else channel.name
+                try:
+                    async for message in source.history(limit=None, oldest_first=True, before=cutoff):
+                        for embed in message.embeds:
+                            parsed = parse_embed(embed)
+                            if parsed:
+                                parsed["channel"] = label
+                                parsed["message_url"] = message.jump_url
+                                all_quotes.append(parsed)
+                                count += 1
+                except discord.Forbidden:
+                    continue
+                except Exception as e:
+                    print(f" (error in {label}: {e})")
+                    continue
 
             print(f" found {count} quotes")
 
