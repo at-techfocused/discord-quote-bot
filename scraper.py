@@ -79,6 +79,8 @@ async def on_ready():
     print("Scanning for old quote bot messages...\n")
 
     all_quotes = []
+    embeds_seen = 0
+    DEBUG_LIMIT = 10  # Log details of the first 10 embeds found for debugging
 
     for guild in client.guilds:
         print(f"Scanning server: {guild.name}")
@@ -115,6 +117,15 @@ async def on_ready():
                         if not message.embeds:
                             continue
                         for embed in message.embeds:
+                            # Debug: log raw embed data for the first few embeds
+                            if embeds_seen < DEBUG_LIMIT:
+                                embeds_seen += 1
+                                print(f"\n    [DEBUG EMBED #{embeds_seen}] from {message.author} in #{label}")
+                                print(f"      Title:       {embed.title!r}")
+                                print(f"      Description: {embed.description!r}")
+                                print(f"      Footer:      {embed.footer.text!r if embed.footer else None}")
+                                print(f"      Author:      {embed.author.name!r if embed.author else None}")
+                                print(f"      Fields:      {[(f.name, f.value) for f in embed.fields]}")
                             parsed = parse_embed(embed)
                             if parsed:
                                 parsed["channel"] = label
