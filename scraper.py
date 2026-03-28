@@ -83,15 +83,9 @@ async def on_ready():
     for guild in client.guilds:
         print(f"Scanning server: {guild.name}")
 
-        # Only scan channels under the "General" category
         cutoff = datetime(2022, 7, 8, tzinfo=timezone.utc)
 
         for channel in guild.text_channels:
-            category_name = channel.category.name.lower() if channel.category else ""
-            if not category_name.startswith("general"):
-                print(f"  Skipping #{channel.name} (not in General category)")
-                continue
-
             # Check if bot has permission to read history
             perms = channel.permissions_for(guild.me)
             if not perms.read_message_history or not perms.read_messages:
