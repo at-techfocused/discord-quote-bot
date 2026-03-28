@@ -16,24 +16,24 @@ API_BASE = "https://discord.com/api/v10"
 
 
 async def api_get(session, url, params=None):
-    """Make a GET request with rate limit handling."""
     while True:
         async with session.get(url, headers=HEADERS, params=params) as resp:
             if resp.status == 429:
                 data = await resp.json()
                 wait = data.get("retry_after", 1.0)
-                print("  Rate limited, waiting %.1fs..." % wait)
+                print("    Rate limited, waiting %.1fs..." % wait)
                 await asyncio.sleep(wait)
                 continue
             if resp.status != 200:
-                print("  API error %d: %s" % (resp.status, await resp.text()))
+                text = await resp.text()
+                print("    API error %d: %s" % (resp.status, text[:200]))
                 return None
             return await resp.json()
 
 
-async def search_guild(session, guild_id, query):
-    """Search a guild for messages matching a query. Returns message objects."""
-    messages = []
+async def search_guild_messages(session, guild_id, query):
+    """Search guild and return only the matched (hit) messages."""
+    hit_messages = []
     offset = 0
 
     while True:
@@ -45,108 +45,133 @@ async def search_guild(session, guild_id, query):
             break
 
         total = data.get("total_results", 0)
-        batch = data["messages"]  # list of lists (each is a message group)
+        batch = data["messages"]
 
         if not batch:
             break
 
+        # Each item in batch is a list of messages (hit + context).
+        # The actual matched message has "hit": true
         for msg_group in batch:
             for msg in msg_group:
-                messages.append(msg)
+                if msg.get("hit"):
+                    hit_messages.append(msg)
 
         offset += len(batch)
-        print("  Fetched %d / %d search results..." % (offset, total))
+        print("    Fetched %d / %d results..." % (min(offset, total), total))
 
         if offset >= total:
             break
 
-    return messages
+    return hit_messages
 
 
-def parse_message(msg):
-    """Parse a message containing QuoteID pattern.
-
-    Looks at both message content and embeds for quote data.
-    """
-    content = msg.get("content") or ""
+def dump_message(msg, label=""):
+    """Print full raw message data for debugging."""
     author = msg.get("author", {})
+    print("  %s" % label)
+    print("    From: %s (id: %s, discriminator: %s)" % (
+        author.get("username", "?"),
+        author.get("id", "?"),
+        author.get("discriminator", "?"),
+    ))
+    print("    Content: %r" % (msg.get("content") or ""))
+    print("    Timestamp: %s" % msg.get("timestamp"))
+    print("    Embeds: %d" % len(msg.get("embeds", [])))
+    for i, emb in enumerate(msg.get("embeds", [])):
+        print("    --- Embed #%d ---" % i)
+        for key in ["title", "description", "url", "color", "type"]:
+            val = emb.get(key)
+            if val is not None:
+                print("      %s: %r" % (key, str(val)[:300]))
+        footer = emb.get("footer")
+        if footer:
+            print("      footer.text: %r" % footer.get("text"))
+            print("      footer.icon_url: %r" % footer.get("icon_url"))
+        emb_author = emb.get("author")
+        if emb_author:
+            print("      author.name: %r" % emb_author.get("name"))
+        for f in emb.get("fields", []):
+            print("      field: %r = %r" % (f.get("name"), f.get("value")))
+    print("")
+
+
+def extract_all_text(msg):
+    """Get all searchable text from a message (content + all embed text)."""
+    parts = [msg.get("content") or ""]
+    for emb in msg.get("embeds", []):
+        parts.append(emb.get("title") or "")
+        parts.append(emb.get("description") or "")
+        footer = emb.get("footer") or {}
+        parts.append(footer.get("text") or "")
+        emb_author = emb.get("author") or {}
+        parts.append(emb_author.get("name") or "")
+        for f in emb.get("fields", []):
+            parts.append(f.get("name") or "")
+            parts.append(f.get("value") or "")
+    return "\n".join(parts)
+
+
+def parse_quote_from_message(msg):
+    """Try to parse quote data from a message. Very flexible matching."""
+    all_text = extract_all_text(msg)
     embeds = msg.get("embeds", [])
-    msg_id = msg.get("id")
-    channel_id = msg.get("channel_id")
     timestamp = msg.get("timestamp")
+    channel_id = msg.get("channel_id")
+    msg_id = msg.get("id")
 
-    # Try to extract QuoteID from content or embeds
-    quote_id_match = re.search(r"QuoteID:\s*(\d+)", content, re.IGNORECASE)
-    if not quote_id_match:
-        # Also check embed footers, descriptions, and fields
-        for embed in embeds:
-            for text in [
-                embed.get("description") or "",
-                (embed.get("footer") or {}).get("text") or "",
-                embed.get("title") or "",
-            ]:
-                quote_id_match = re.search(r"QuoteID:\s*(\d+)", text, re.IGNORECASE)
-                if quote_id_match:
-                    break
-            # Check fields too
-            if not quote_id_match:
-                for field in embed.get("fields", []):
-                    for text in [field.get("name", ""), field.get("value", "")]:
-                        quote_id_match = re.search(r"QuoteID:\s*(\d+)", text, re.IGNORECASE)
-                        if quote_id_match:
-                            break
-                    if quote_id_match:
-                        break
-            if quote_id_match:
-                break
+    # Try to find a quote ID with various patterns
+    old_id = None
+    for pattern in [
+        r"QuoteID:\s*(\d+)",
+        r"Quote\s*ID:\s*(\d+)",
+        r"Quote\s*#\s*(\d+)",
+        r"\bID\s+(\d+)",
+        r"#(\d+)",
+    ]:
+        match = re.search(pattern, all_text, re.IGNORECASE)
+        if match:
+            old_id = int(match.group(1))
+            break
 
-    if not quote_id_match:
-        return None
-
-    old_id = int(quote_id_match.group(1))
-
-    # Now try to extract quote text and author from embeds or content
+    # Extract quote text and author from embeds
     quote_text = None
     quote_author = None
     added_by = None
 
-    # Check embeds first (the old bot likely used embeds)
-    for embed in embeds:
-        desc = embed.get("description") or ""
-        footer_text = (embed.get("footer") or {}).get("text") or ""
-        title = embed.get("title") or ""
+    for emb in embeds:
+        desc = emb.get("description") or ""
+        footer_text = (emb.get("footer") or {}).get("text") or ""
 
-        # Try to get quote text from description
         if desc and not quote_text:
             lines = desc.strip().split("\n")
             q_lines = []
             for line in lines:
                 stripped = line.strip()
-                if re.match(r"^[-\u2013\u2014]\s+", stripped):
-                    quote_author = re.sub(r"^[-\u2013\u2014]\s+", "", stripped).strip()
-                elif stripped and not re.match(r"QuoteID:", stripped, re.IGNORECASE):
+                # Author line: starts with dash variants
+                if re.match(r"^[-\u2013\u2014~]\s+", stripped):
+                    quote_author = re.sub(r"^[-\u2013\u2014~]\s+", "", stripped).strip()
+                elif stripped:
                     q_lines.append(stripped)
             if q_lines:
-                quote_text = " ".join(q_lines).strip()
+                quote_text = "\n".join(q_lines).strip()
+                # Remove surrounding quote marks
                 quote_text = re.sub(r'^["""\u201c]|["""\u201d]$', "", quote_text).strip()
 
-        # Try footer for "Added by"
         if footer_text:
-            added_match = re.search(r"Added by\s+(.+?)(?:\n|$)", footer_text)
-            if added_match:
-                added_by = added_match.group(1).strip()
-            # Also check for ID in footer as backup
-            if not old_id:
-                id_match = re.search(r"ID\s+(\d+)", footer_text)
-                if id_match:
-                    old_id = int(id_match.group(1))
+            m = re.search(r"Added by\s+(.+?)(?:\n|$)", footer_text)
+            if m:
+                added_by = m.group(1).strip()
 
-    # If we still don't have quote text, try the message content
+    # Fallback: try message content
     if not quote_text:
-        # Remove the QuoteID part and see what's left
-        cleaned = re.sub(r"QuoteID:\s*\d+", "", content).strip()
+        content = msg.get("content") or ""
+        cleaned = re.sub(r"QuoteID:\s*\d+", "", content, flags=re.IGNORECASE).strip()
         if cleaned:
             quote_text = cleaned
+
+    if not quote_text and not old_id:
+        return None
 
     return {
         "old_id": old_id,
@@ -164,55 +189,58 @@ async def main():
         print("Error: Set DISCORD_BOT_TOKEN in .env")
         return
 
+    print("Starting quote scraper...\n")
+
     async with aiohttp.ClientSession() as session:
-        # Get the guilds the bot is in
         guilds_data = await api_get(session, API_BASE + "/users/@me/guilds")
         if not guilds_data:
             print("Failed to fetch guilds")
             return
 
         all_quotes = []
-        debug_count = 0
 
         for guild in guilds_data:
             guild_id = guild["id"]
             guild_name = guild["name"]
-            print("Searching server: %s" % guild_name)
+            print("Server: %s (ID: %s)" % (guild_name, guild_id))
 
-            print('  Searching for "QuoteID:"...')
-            messages = await search_guild(session, guild_id, "QuoteID:")
-            print("  Found %d messages" % len(messages))
+            # Search with multiple queries to cast a wide net
+            search_terms = ["QuoteID", "Successfully added new quote"]
+            seen_msg_ids = set()
 
-            for msg in messages:
-                # Debug: print first 5 raw messages
-                if debug_count < 5:
-                    debug_count += 1
-                    print("\n  [DEBUG MSG #%d]" % debug_count)
-                    print("    From: %s" % msg.get("author", {}).get("username", "?"))
-                    print("    Content: %r" % (msg.get("content") or "")[:200])
-                    for i, emb in enumerate(msg.get("embeds", [])):
-                        print("    Embed %d:" % i)
-                        print("      Title: %r" % emb.get("title"))
-                        print("      Desc:  %r" % (emb.get("description") or "")[:200])
-                        footer = emb.get("footer") or {}
-                        print("      Footer: %r" % footer.get("text"))
-                        for f in emb.get("fields", []):
-                            print("      Field: %s = %s" % (f.get("name"), f.get("value")))
+            for term in search_terms:
+                print('  Searching for "%s"...' % term)
+                messages = await search_guild_messages(session, guild_id, term)
+                print("  Found %d hit messages" % len(messages))
 
-                parsed = parse_message(msg)
-                if parsed:
-                    all_quotes.append(parsed)
+                # Debug: dump first 5 unique messages per search term
+                debug_shown = 0
+                for msg in messages:
+                    mid = msg.get("id")
+                    if mid in seen_msg_ids:
+                        continue
+                    seen_msg_ids.add(mid)
+
+                    if debug_shown < 5:
+                        debug_shown += 1
+                        dump_message(msg, "[DEBUG #%d for '%s']" % (debug_shown, term))
+
+                    parsed = parse_quote_from_message(msg)
+                    if parsed:
+                        all_quotes.append(parsed)
+
+            print("  Total parsed so far: %d\n" % len(all_quotes))
 
         # Sort by old ID
         all_quotes.sort(key=lambda q: q.get("old_id") or 0)
 
-        # Deduplicate
-        seen_ids = set()
+        # Deduplicate by ID or quote text
+        seen = set()
         unique_quotes = []
         for q in all_quotes:
-            key = q["old_id"] or q["quote_text"]
-            if key not in seen_ids:
-                seen_ids.add(key)
+            key = q["old_id"] if q["old_id"] else q["quote_text"]
+            if key not in seen:
+                seen.add(key)
                 unique_quotes.append(q)
 
         # Write JSON
@@ -231,7 +259,7 @@ async def main():
                 f.write("Date: %s\n" % (q["timestamp"] or "Unknown"))
                 f.write("-" * 60 + "\n")
 
-        print("\nDone! Found %d unique quotes." % len(unique_quotes))
+        print("Done! Found %d unique quotes." % len(unique_quotes))
         print("  JSON:     %s" % OUTPUT_FILE)
         print("  Readable: %s" % READABLE_FILE)
 
