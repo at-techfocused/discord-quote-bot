@@ -14,12 +14,6 @@ READABLE_FILE = "scraped_quotes.txt"
 HEADERS = {"Authorization": "Bot " + (TOKEN or "")}
 API_BASE = "https://discord.com/api/v10"
 
-# Search terms that should match the old quote bot embeds
-SEARCH_QUERIES = [
-    "Successfully added new quote",
-    "Successfully added",
-]
-
 
 async def api_get(session, url, params=None):
     """Make a GET request with rate limit handling."""
@@ -43,7 +37,7 @@ async def search_guild(session, guild_id, query):
     offset = 0
 
     while True:
-        params = {"content": query, "has": "embed", "offset": offset}
+        params = {"content": query, "offset": offset}
         url = "%s/guilds/%s/messages/search" % (API_BASE, guild_id)
         data = await api_get(session, url, params)
 
@@ -69,58 +63,99 @@ async def search_guild(session, guild_id, query):
     return messages
 
 
-def parse_embed_dict(embed):
-    """Parse an embed dict (from API) into a quote."""
-    title = embed.get("title") or ""
-    if "successfully added" not in title.lower():
+def parse_message(msg):
+    """Parse a message containing QuoteID pattern.
+
+    Looks at both message content and embeds for quote data.
+    """
+    content = msg.get("content") or ""
+    author = msg.get("author", {})
+    embeds = msg.get("embeds", [])
+    msg_id = msg.get("id")
+    channel_id = msg.get("channel_id")
+    timestamp = msg.get("timestamp")
+
+    # Try to extract QuoteID from content or embeds
+    quote_id_match = re.search(r"QuoteID:\s*(\d+)", content, re.IGNORECASE)
+    if not quote_id_match:
+        # Also check embed footers, descriptions, and fields
+        for embed in embeds:
+            for text in [
+                embed.get("description") or "",
+                (embed.get("footer") or {}).get("text") or "",
+                embed.get("title") or "",
+            ]:
+                quote_id_match = re.search(r"QuoteID:\s*(\d+)", text, re.IGNORECASE)
+                if quote_id_match:
+                    break
+            # Check fields too
+            if not quote_id_match:
+                for field in embed.get("fields", []):
+                    for text in [field.get("name", ""), field.get("value", "")]:
+                        quote_id_match = re.search(r"QuoteID:\s*(\d+)", text, re.IGNORECASE)
+                        if quote_id_match:
+                            break
+                    if quote_id_match:
+                        break
+            if quote_id_match:
+                break
+
+    if not quote_id_match:
         return None
 
-    description = embed.get("description") or ""
-    footer = embed.get("footer", {}) or {}
-    footer_text = footer.get("text") or ""
+    old_id = int(quote_id_match.group(1))
 
-    # Parse quote text and author from description
-    lines = description.strip().split("\n")
-
-    quote_lines = []
-    author = None
-    for line in lines:
-        stripped = line.strip()
-        if re.match(r"^[-\u2013\u2014]\s+", stripped):
-            author = re.sub(r"^[-\u2013\u2014]\s+", "", stripped).strip()
-        elif stripped:
-            quote_lines.append(stripped)
-
-    quote_text = " ".join(quote_lines).strip()
-    # Remove surrounding quotes if present
-    quote_text = re.sub(r'^["""\u201c]|["""\u201d]$', "", quote_text).strip()
-
-    # Parse footer: "Added by Username#1234\nat YYYY-MM-DD HH:MM:SS | ID 184"
+    # Now try to extract quote text and author from embeds or content
+    quote_text = None
+    quote_author = None
     added_by = None
-    old_id = None
-    timestamp = None
 
-    added_match = re.search(r"Added by\s+(.+?)(?:\n|$)", footer_text)
-    if added_match:
-        added_by = added_match.group(1).strip()
+    # Check embeds first (the old bot likely used embeds)
+    for embed in embeds:
+        desc = embed.get("description") or ""
+        footer_text = (embed.get("footer") or {}).get("text") or ""
+        title = embed.get("title") or ""
 
-    id_match = re.search(r"ID\s+(\d+)", footer_text)
-    if id_match:
-        old_id = int(id_match.group(1))
+        # Try to get quote text from description
+        if desc and not quote_text:
+            lines = desc.strip().split("\n")
+            q_lines = []
+            for line in lines:
+                stripped = line.strip()
+                if re.match(r"^[-\u2013\u2014]\s+", stripped):
+                    quote_author = re.sub(r"^[-\u2013\u2014]\s+", "", stripped).strip()
+                elif stripped and not re.match(r"QuoteID:", stripped, re.IGNORECASE):
+                    q_lines.append(stripped)
+            if q_lines:
+                quote_text = " ".join(q_lines).strip()
+                quote_text = re.sub(r'^["""\u201c]|["""\u201d]$', "", quote_text).strip()
 
-    time_match = re.search(r"at\s+([\d-]+\s+[\d:]+)", footer_text)
-    if time_match:
-        timestamp = time_match.group(1).strip()
+        # Try footer for "Added by"
+        if footer_text:
+            added_match = re.search(r"Added by\s+(.+?)(?:\n|$)", footer_text)
+            if added_match:
+                added_by = added_match.group(1).strip()
+            # Also check for ID in footer as backup
+            if not old_id:
+                id_match = re.search(r"ID\s+(\d+)", footer_text)
+                if id_match:
+                    old_id = int(id_match.group(1))
 
+    # If we still don't have quote text, try the message content
     if not quote_text:
-        return None
+        # Remove the QuoteID part and see what's left
+        cleaned = re.sub(r"QuoteID:\s*\d+", "", content).strip()
+        if cleaned:
+            quote_text = cleaned
 
     return {
         "old_id": old_id,
-        "quote_text": quote_text,
-        "author": author,
+        "quote_text": quote_text or "(could not parse)",
+        "author": quote_author,
         "added_by": added_by,
         "timestamp": timestamp,
+        "channel_id": channel_id,
+        "message_id": msg_id,
     }
 
 
@@ -137,34 +172,36 @@ async def main():
             return
 
         all_quotes = []
+        debug_count = 0
 
         for guild in guilds_data:
             guild_id = guild["id"]
             guild_name = guild["name"]
             print("Searching server: %s" % guild_name)
 
-            for query in SEARCH_QUERIES:
-                print("  Searching for: \"%s\"" % query)
-                messages = await search_guild(session, guild_id, query)
-                print("  Found %d messages" % len(messages))
+            print('  Searching for "QuoteID:"...')
+            messages = await search_guild(session, guild_id, "QuoteID:")
+            print("  Found %d messages" % len(messages))
 
-                for msg in messages:
-                    embeds = msg.get("embeds", [])
-                    channel_id = msg.get("channel_id", "unknown")
+            for msg in messages:
+                # Debug: print first 5 raw messages
+                if debug_count < 5:
+                    debug_count += 1
+                    print("\n  [DEBUG MSG #%d]" % debug_count)
+                    print("    From: %s" % msg.get("author", {}).get("username", "?"))
+                    print("    Content: %r" % (msg.get("content") or "")[:200])
+                    for i, emb in enumerate(msg.get("embeds", [])):
+                        print("    Embed %d:" % i)
+                        print("      Title: %r" % emb.get("title"))
+                        print("      Desc:  %r" % (emb.get("description") or "")[:200])
+                        footer = emb.get("footer") or {}
+                        print("      Footer: %r" % footer.get("text"))
+                        for f in emb.get("fields", []):
+                            print("      Field: %s = %s" % (f.get("name"), f.get("value")))
 
-                    # Debug: show first few raw embeds
-                    if len(all_quotes) == 0 and embeds:
-                        print("  [DEBUG] Sample embed from message:")
-                        print("    Title: %r" % (embeds[0].get("title"),))
-                        print("    Desc:  %r" % (embeds[0].get("description"),))
-                        footer = embeds[0].get("footer", {}) or {}
-                        print("    Footer: %r" % (footer.get("text"),))
-
-                    for embed in embeds:
-                        parsed = parse_embed_dict(embed)
-                        if parsed:
-                            parsed["channel_id"] = channel_id
-                            all_quotes.append(parsed)
+                parsed = parse_message(msg)
+                if parsed:
+                    all_quotes.append(parsed)
 
         # Sort by old ID
         all_quotes.sort(key=lambda q: q.get("old_id") or 0)
@@ -179,8 +216,8 @@ async def main():
                 unique_quotes.append(q)
 
         # Write JSON
-        with open(OUTPUT_FILE, "w") as f:
-            json.dump(unique_quotes, f, indent=2)
+        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+            json.dump(unique_quotes, f, indent=2, ensure_ascii=False)
 
         # Write readable text
         with open(READABLE_FILE, "w", encoding="utf-8") as f:
