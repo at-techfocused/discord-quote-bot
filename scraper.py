@@ -88,7 +88,7 @@ async def on_ready():
 
         for channel in guild.text_channels:
             category_name = channel.category.name.lower() if channel.category else ""
-            if category_name != "general":
+            if not category_name.startswith("general"):
                 print(f"  Skipping #{channel.name} (not in General category)")
                 continue
 
