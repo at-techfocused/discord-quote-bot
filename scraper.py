@@ -1,42 +1,93 @@
 import os
 import re
 import json
-from datetime import datetime, timezone
-import discord
+import asyncio
+import aiohttp
 from dotenv import load_dotenv
 
 load_dotenv()
 
-intents = discord.Intents.default()
-intents.message_content = True
-
-client = discord.Client(intents=intents)
-
+TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 OUTPUT_FILE = "scraped_quotes.json"
 READABLE_FILE = "scraped_quotes.txt"
 
+HEADERS = {"Authorization": "Bot " + (TOKEN or "")}
+API_BASE = "https://discord.com/api/v10"
 
-def parse_embed(embed: discord.Embed) -> dict | None:
-    """Parse an old quote bot embed into structured data."""
-    # Check if this is a "Successfully added new quote" embed
-    title = embed.title or ""
+# Search terms that should match the old quote bot embeds
+SEARCH_QUERIES = [
+    "Successfully added new quote",
+    "Successfully added",
+]
+
+
+async def api_get(session, url, params=None):
+    """Make a GET request with rate limit handling."""
+    while True:
+        async with session.get(url, headers=HEADERS, params=params) as resp:
+            if resp.status == 429:
+                data = await resp.json()
+                wait = data.get("retry_after", 1.0)
+                print("  Rate limited, waiting %.1fs..." % wait)
+                await asyncio.sleep(wait)
+                continue
+            if resp.status != 200:
+                print("  API error %d: %s" % (resp.status, await resp.text()))
+                return None
+            return await resp.json()
+
+
+async def search_guild(session, guild_id, query):
+    """Search a guild for messages matching a query. Returns message objects."""
+    messages = []
+    offset = 0
+
+    while True:
+        params = {"content": query, "has": "embed", "offset": offset}
+        url = "%s/guilds/%s/messages/search" % (API_BASE, guild_id)
+        data = await api_get(session, url, params)
+
+        if not data or "messages" not in data:
+            break
+
+        total = data.get("total_results", 0)
+        batch = data["messages"]  # list of lists (each is a message group)
+
+        if not batch:
+            break
+
+        for msg_group in batch:
+            for msg in msg_group:
+                messages.append(msg)
+
+        offset += len(batch)
+        print("  Fetched %d / %d search results..." % (offset, total))
+
+        if offset >= total:
+            break
+
+    return messages
+
+
+def parse_embed_dict(embed):
+    """Parse an embed dict (from API) into a quote."""
+    title = embed.get("title") or ""
     if "successfully added" not in title.lower():
         return None
 
-    description = embed.description or ""
-    footer_text = embed.footer.text or "" if embed.footer else ""
+    description = embed.get("description") or ""
+    footer = embed.get("footer", {}) or {}
+    footer_text = footer.get("text") or ""
 
     # Parse quote text and author from description
-    # Format: "quote text\n\n- Author" or "quote text\n- Author"
     lines = description.strip().split("\n")
 
-    # Find the author line (starts with "- " or "– ")
     quote_lines = []
     author = None
     for line in lines:
         stripped = line.strip()
-        if re.match(r"^[-–—]\s+", stripped):
-            author = re.sub(r"^[-–—]\s+", "", stripped).strip()
+        if re.match(r"^[-\u2013\u2014]\s+", stripped):
+            author = re.sub(r"^[-\u2013\u2014]\s+", "", stripped).strip()
         elif stripped:
             quote_lines.append(stripped)
 
@@ -73,120 +124,80 @@ def parse_embed(embed: discord.Embed) -> dict | None:
     }
 
 
-@client.event
-async def on_ready():
-    print(f"Logged in as {client.user}")
-    print("Scanning for old quote bot messages...\n")
-
-    all_quotes = []
-    embeds_seen = 0
-    DEBUG_LIMIT = 10  # Log details of the first 10 embeds found for debugging
-
-    for guild in client.guilds:
-        print(f"Scanning server: {guild.name}")
-
-        cutoff = datetime(2022, 7, 8, tzinfo=timezone.utc)
-
-        for channel in guild.text_channels:
-            # Check if bot has permission to read history
-            perms = channel.permissions_for(guild.me)
-            if not perms.read_message_history or not perms.read_messages:
-                print(f"  Skipping #{channel.name} (no permission)")
-                continue
-
-            print(f"  Scanning #{channel.name}...", end="", flush=True)
-            count = 0
-
-            # Scan the main channel and its archived threads
-            sources = [channel]
-            try:
-                async for thread in channel.archived_threads(limit=None):
-                    sources.append(thread)
-            except (discord.Forbidden, discord.HTTPException):
-                pass
-
-            for source in sources:
-                label = f"{channel.name}/{source.name}" if source != channel else channel.name
-                msg_count = 0
-                try:
-                    async for message in source.history(limit=None, oldest_first=True, before=cutoff):
-                        msg_count += 1
-                        if msg_count % 500 == 0:
-                            print(f"\r  Scanning #{label}... {msg_count} messages scanned, {count} quotes found so far", end="", flush=True)
-                        # Only check messages that have embeds
-                        if not message.embeds:
-                            continue
-                        for embed in message.embeds:
-                            # Debug: log raw embed data for the first few embeds
-                            if embeds_seen < DEBUG_LIMIT:
-                                embeds_seen += 1
-                                footer_val = embed.footer.text if embed.footer else None
-                                author_val = embed.author.name if embed.author else None
-                                fields_val = [(f.name, f.value) for f in embed.fields]
-                                print("")
-                                print("    [DEBUG EMBED #%d] from %s in #%s" % (embeds_seen, message.author, label))
-                                print("      Title:       %r" % embed.title)
-                                print("      Description: %r" % embed.description)
-                                print("      Footer:      %r" % footer_val)
-                                print("      Author:      %r" % author_val)
-                                print("      Fields:      %r" % (fields_val,))
-                            parsed = parse_embed(embed)
-                            if parsed:
-                                parsed["channel"] = label
-                                parsed["message_url"] = message.jump_url
-                                all_quotes.append(parsed)
-                                count += 1
-                except discord.Forbidden:
-                    continue
-                except Exception as e:
-                    print(f" (error in {label}: {e})")
-                    continue
-
-            print(f"\r  Scanning #{channel.name}... done! {msg_count} messages, {count} quotes found")
-
-    # Sort by old ID if available, otherwise by order found
-    all_quotes.sort(key=lambda q: q["old_id"] or 0)
-
-    # Remove duplicates by old_id
-    seen_ids = set()
-    unique_quotes = []
-    for q in all_quotes:
-        key = q["old_id"] or q["quote_text"]
-        if key not in seen_ids:
-            seen_ids.add(key)
-            unique_quotes.append(q)
-
-    # Write JSON
-    with open(OUTPUT_FILE, "w") as f:
-        json.dump(unique_quotes, f, indent=2)
-
-    # Write readable text
-    with open(READABLE_FILE, "w") as f:
-        f.write(f"SCRAPED QUOTES ({len(unique_quotes)} total)\n")
-        f.write("=" * 60 + "\n\n")
-        for q in unique_quotes:
-            f.write(f"ID: {q['old_id'] or '?'}\n")
-            f.write(f"Quote: {q['quote_text']}\n")
-            f.write(f"Author: {q['author'] or 'Unknown'}\n")
-            f.write(f"Added by: {q['added_by'] or 'Unknown'}\n")
-            f.write(f"Date: {q['timestamp'] or 'Unknown'}\n")
-            f.write(f"Channel: #{q['channel']}\n")
-            f.write("-" * 60 + "\n")
-
-    print(f"\nDone! Found {len(unique_quotes)} unique quotes.")
-    print(f"  JSON:     {OUTPUT_FILE}")
-    print(f"  Readable: {READABLE_FILE}")
-
-    await client.close()
-
-
-def main():
-    token = os.getenv("DISCORD_BOT_TOKEN")
-    if not token:
+async def main():
+    if not TOKEN:
         print("Error: Set DISCORD_BOT_TOKEN in .env")
         return
-    client.run(token)
+
+    async with aiohttp.ClientSession() as session:
+        # Get the guilds the bot is in
+        guilds_data = await api_get(session, API_BASE + "/users/@me/guilds")
+        if not guilds_data:
+            print("Failed to fetch guilds")
+            return
+
+        all_quotes = []
+
+        for guild in guilds_data:
+            guild_id = guild["id"]
+            guild_name = guild["name"]
+            print("Searching server: %s" % guild_name)
+
+            for query in SEARCH_QUERIES:
+                print("  Searching for: \"%s\"" % query)
+                messages = await search_guild(session, guild_id, query)
+                print("  Found %d messages" % len(messages))
+
+                for msg in messages:
+                    embeds = msg.get("embeds", [])
+                    channel_id = msg.get("channel_id", "unknown")
+
+                    # Debug: show first few raw embeds
+                    if len(all_quotes) == 0 and embeds:
+                        print("  [DEBUG] Sample embed from message:")
+                        print("    Title: %r" % (embeds[0].get("title"),))
+                        print("    Desc:  %r" % (embeds[0].get("description"),))
+                        footer = embeds[0].get("footer", {}) or {}
+                        print("    Footer: %r" % (footer.get("text"),))
+
+                    for embed in embeds:
+                        parsed = parse_embed_dict(embed)
+                        if parsed:
+                            parsed["channel_id"] = channel_id
+                            all_quotes.append(parsed)
+
+        # Sort by old ID
+        all_quotes.sort(key=lambda q: q.get("old_id") or 0)
+
+        # Deduplicate
+        seen_ids = set()
+        unique_quotes = []
+        for q in all_quotes:
+            key = q["old_id"] or q["quote_text"]
+            if key not in seen_ids:
+                seen_ids.add(key)
+                unique_quotes.append(q)
+
+        # Write JSON
+        with open(OUTPUT_FILE, "w") as f:
+            json.dump(unique_quotes, f, indent=2)
+
+        # Write readable text
+        with open(READABLE_FILE, "w", encoding="utf-8") as f:
+            f.write("SCRAPED QUOTES (%d total)\n" % len(unique_quotes))
+            f.write("=" * 60 + "\n\n")
+            for q in unique_quotes:
+                f.write("ID: %s\n" % (q["old_id"] or "?"))
+                f.write("Quote: %s\n" % q["quote_text"])
+                f.write("Author: %s\n" % (q["author"] or "Unknown"))
+                f.write("Added by: %s\n" % (q["added_by"] or "Unknown"))
+                f.write("Date: %s\n" % (q["timestamp"] or "Unknown"))
+                f.write("-" * 60 + "\n")
+
+        print("\nDone! Found %d unique quotes." % len(unique_quotes))
+        print("  JSON:     %s" % OUTPUT_FILE)
+        print("  Readable: %s" % READABLE_FILE)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
