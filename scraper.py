@@ -134,41 +134,97 @@ def parse_quote_from_message(msg):
             old_id = int(match.group(1))
             break
 
-    # Extract quote text and author from embeds
+    # Extract quote text, author, and added_by from embed description.
+    # Format from the old bot (all in embed description):
+    #
+    #   Brissett (2025 never left Patriots org) > Brady (now) > Jimmy G (Life)
+    #
+    #   - 🗣 Milz
+    #
+    #   Added by Don Juan#1523
+    #   ✍ at 2022-05-07 12:07:30.023561 🕑 !
+    #   QuoteID: 359 ✏
+    #
     quote_text = None
     quote_author = None
     added_by = None
+    quote_timestamp = None
 
     for emb in embeds:
         desc = emb.get("description") or ""
-        footer_text = (emb.get("footer") or {}).get("text") or ""
+        if not desc:
+            continue
 
-        if desc and not quote_text:
-            lines = desc.strip().split("\n")
-            q_lines = []
-            for line in lines:
-                stripped = line.strip()
-                # Author line: starts with dash variants
-                if re.match(r"^[-\u2013\u2014~]\s+", stripped):
-                    quote_author = re.sub(r"^[-\u2013\u2014~]\s+", "", stripped).strip()
-                elif stripped:
-                    q_lines.append(stripped)
-            if q_lines:
-                quote_text = "\n".join(q_lines).strip()
-                # Remove surrounding quote marks
-                quote_text = re.sub(r'^["""\u201c]|["""\u201d]$', "", quote_text).strip()
+        lines = desc.strip().split("\n")
 
-        if footer_text:
-            m = re.search(r"Added by\s+(.+?)(?:\n|$)", footer_text)
+        # Find key markers to split the description
+        added_by_idx = None
+        author_idx = None
+        quoteid_idx = None
+        timestamp_idx = None
+
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if re.match(r"Added by\s+", stripped, re.IGNORECASE):
+                added_by_idx = i
+            if re.match(r"^[-\u2013\u2014~]\s+", stripped):
+                author_idx = i
+            if re.search(r"QuoteID:\s*\d+", stripped, re.IGNORECASE):
+                quoteid_idx = i
+            if re.search(r"at\s+\d{4}-\d{2}-\d{2}", stripped):
+                timestamp_idx = i
+
+        # Everything before the author line (or the Added by line) is the quote text
+        # Determine where quote text ends
+        end_idx = len(lines)
+        for idx in [author_idx, added_by_idx, quoteid_idx, timestamp_idx]:
+            if idx is not None and idx < end_idx:
+                end_idx = idx
+
+        q_lines = []
+        for line in lines[:end_idx]:
+            stripped = line.strip()
+            if stripped:
+                q_lines.append(stripped)
+
+        if q_lines:
+            quote_text = "\n".join(q_lines).strip()
+            # Remove surrounding quote marks
+            quote_text = re.sub(r'^["""\u201c]|["""\u201d]$', "", quote_text).strip()
+
+        # Extract author from the dash line
+        if author_idx is not None:
+            author_line = lines[author_idx].strip()
+            quote_author = re.sub(r"^[-\u2013\u2014~]\s+", "", author_line).strip()
+            # Remove emoji prefixes like 🗣
+            quote_author = re.sub(r"^[\U0001f000-\U0001ffff\u2600-\u27ff]+\s*", "", quote_author).strip()
+
+        # Extract "Added by"
+        if added_by_idx is not None:
+            added_line = lines[added_by_idx].strip()
+            m = re.match(r"Added by\s+(.+)", added_line, re.IGNORECASE)
             if m:
                 added_by = m.group(1).strip()
 
-    # Fallback: try message content
-    if not quote_text:
-        content = msg.get("content") or ""
-        cleaned = re.sub(r"QuoteID:\s*\d+", "", content, flags=re.IGNORECASE).strip()
-        if cleaned:
-            quote_text = cleaned
+        # Extract timestamp from the "at YYYY-MM-DD..." line
+        if timestamp_idx is not None:
+            ts_line = lines[timestamp_idx].strip()
+            m = re.search(r"at\s+([\d-]+\s+[\d:.]+)", ts_line)
+            if m:
+                quote_timestamp = m.group(1).strip()
+
+        # Only need to parse the first embed with content
+        if quote_text or quote_author:
+            break
+
+    # Also check footer (some versions may use footer)
+    if not added_by:
+        for emb in embeds:
+            footer_text = (emb.get("footer") or {}).get("text") or ""
+            if footer_text:
+                m = re.search(r"Added by\s+(.+?)(?:\n|$)", footer_text)
+                if m:
+                    added_by = m.group(1).strip()
 
     if not quote_text and not old_id:
         return None
@@ -178,7 +234,7 @@ def parse_quote_from_message(msg):
         "quote_text": quote_text or "(could not parse)",
         "author": quote_author,
         "added_by": added_by,
-        "timestamp": timestamp,
+        "timestamp": quote_timestamp or timestamp,
         "channel_id": channel_id,
         "message_id": msg_id,
     }
