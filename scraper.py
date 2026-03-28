@@ -120,14 +120,16 @@ async def on_ready():
                             # Debug: log raw embed data for the first few embeds
                             if embeds_seen < DEBUG_LIMIT:
                                 embeds_seen += 1
-                                print(f"\n    [DEBUG EMBED #{embeds_seen}] from {message.author} in #{label}")
-                                print(f"      Title:       {embed.title!r}")
-                                print(f"      Description: {embed.description!r}")
                                 footer_val = embed.footer.text if embed.footer else None
                                 author_val = embed.author.name if embed.author else None
-                                print(f"      Footer:      {footer_val!r}")
-                                print(f"      Author:      {author_val!r}")
-                                print(f"      Fields:      {[(f.name, f.value) for f in embed.fields]}")
+                                fields_val = [(f.name, f.value) for f in embed.fields]
+                                print("")
+                                print("    [DEBUG EMBED #%d] from %s in #%s" % (embeds_seen, message.author, label))
+                                print("      Title:       %r" % embed.title)
+                                print("      Description: %r" % embed.description)
+                                print("      Footer:      %r" % footer_val)
+                                print("      Author:      %r" % author_val)
+                                print("      Fields:      %r" % (fields_val,))
                             parsed = parse_embed(embed)
                             if parsed:
                                 parsed["channel"] = label
