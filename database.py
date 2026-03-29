@@ -1,7 +1,10 @@
+import json
 import aiosqlite
 import os
 
 DB_PATH = os.getenv("DB_PATH", "quotes.db")
+SEED_FILE = os.path.join(os.path.dirname(__file__), "cleaned_quotes.json")
+SEED_SERVER_ID = "219948617425747968"
 
 
 async def init_db():
@@ -31,6 +34,35 @@ async def init_db():
             ON quotes (server_id, author_name)
         """)
         await db.commit()
+
+        # One-time seed from cleaned_quotes.json if DB is empty
+        if os.path.exists(SEED_FILE):
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM quotes WHERE server_id = ?",
+                (SEED_SERVER_ID,),
+            )
+            count = (await cursor.fetchone())[0]
+            if count == 0:
+                with open(SEED_FILE, "r", encoding="utf-8") as f:
+                    quotes = json.load(f)
+                for i, q in enumerate(quotes, start=1):
+                    await db.execute(
+                        """INSERT INTO quotes
+                           (server_id, quote_id, quote_text, author_user_id,
+                            author_name, added_by_user_id, timestamp)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            SEED_SERVER_ID,
+                            i,
+                            q["quote_text"],
+                            None,
+                            q.get("author_name"),
+                            q.get("added_by", "Unknown"),
+                            q.get("timestamp", "Unknown"),
+                        ),
+                    )
+                await db.commit()
+                print("Seeded %d quotes from %s" % (len(quotes), SEED_FILE))
 
 
 async def get_next_quote_id(db, server_id: str) -> int:
