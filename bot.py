@@ -38,12 +38,12 @@ def get_embed_color(guild: discord.Guild | None, quote: dict) -> discord.Color:
 
 def format_single_quote_embed(quote: dict, guild: discord.Guild | None = None) -> discord.Embed:
     author_mention = (
-        "<@%s>" % quote["author_user_id"]
+        f"<@{quote['author_user_id']}>"
         if quote["author_user_id"]
         else quote["author_name"] or "Unknown"
     )
 
-    # Parse timestamp
+    # Parse timestamp into a timezone-aware datetime object
     ts_plain = quote["timestamp"]
     parsed_dt = None
     for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
@@ -56,27 +56,30 @@ def format_single_quote_embed(quote: dict, guild: discord.Guild | None = None) -
         except ValueError:
             continue
 
+    # Create the embed with the mobile-friendly Hanging Citation and native timestamp
     embed = discord.Embed(
-        description="> %s\n> \n> ***\u2014*** %s" % (quote["quote_text"], author_mention),
+        description=f"> {quote['quote_text']}\n> \n> ***\u2014*** {author_mention}",
         color=get_embed_color(guild, quote),
         timestamp=parsed_dt,
     )
-    embed.set_author(name="Quote #%d" % quote["quote_id"])
+    
+    embed.set_author(name=f"Quote #{quote['quote_id']}")
 
+    # Large Avatar Thumbnail
     if guild and quote.get("author_user_id"):
         member = guild.get_member(int(quote["author_user_id"]))
         if member and member.avatar:
             embed.set_thumbnail(url=member.avatar.url)
 
-    # Footer with resolved display name
+    # Clean Footer with resolved display name
     added_by_raw = quote["added_by_user_id"]
     if added_by_raw and added_by_raw.isdigit() and guild:
         member = guild.get_member(int(added_by_raw))
-        added_by_text = member.display_name if member else "User %s" % added_by_raw
+        added_by_text = member.display_name if member else f"User {added_by_raw}"
     else:
         added_by_text = added_by_raw or "Unknown"
 
-    embed.set_footer(text="Added by %s" % added_by_text)
+    embed.set_footer(text=f"Added by {added_by_text}")
     return embed
 
 
@@ -94,10 +97,10 @@ async def on_ready():
     await init_db()
     try:
         synced = await bot.tree.sync()
-        print("Synced %d commands" % len(synced))
+        print(f"Synced {len(synced)} commands")
     except Exception as e:
-        print("Failed to sync commands: %s" % e)
-    print("Bot is ready as %s" % bot.user)
+        print(f"Failed to sync commands: {e}")
+    print(f"Bot is ready as {bot.user}")
 
 
 @bot.event
@@ -143,7 +146,7 @@ async def qadd(
 
     if len(text) > QUOTE_MAX_LENGTH:
         await interaction.response.send_message(
-            "Quote text must be %d characters or fewer (yours: %d)." % (QUOTE_MAX_LENGTH, len(text)),
+            f"Quote text must be {QUOTE_MAX_LENGTH} characters or fewer (yours: {len(text)}).",
             ephemeral=True,
         )
         return
@@ -159,14 +162,16 @@ async def qadd(
     author_display = author_user.mention if author_user else author_text or "Unknown"
 
     embed = discord.Embed(
-        description="> %s\n> \n> ***\u2014*** %s" % (text, author_display),
+        description=f"> {text}\n> \n> ***\u2014*** {author_display}",
         color=discord.Color.green(),
         timestamp=datetime.now(timezone.utc),
     )
-    embed.set_author(name="Quote #%d Added" % quote_id)
+    embed.set_author(name=f"Quote #{quote_id} Added")
+    
     if author_user and author_user.avatar:
         embed.set_thumbnail(url=author_user.avatar.url)
-    embed.set_footer(text="Added by %s" % interaction.user.display_name)
+        
+    embed.set_footer(text=f"Added by {interaction.user.display_name}")
     await interaction.response.send_message(embed=embed)
 
 
@@ -176,7 +181,7 @@ async def qadd(
 async def qremove(interaction: discord.Interaction, id: int):
     quote = await get_quote(str(interaction.guild_id), id)
     if not quote:
-        await interaction.response.send_message("Quote #%d not found." % id, ephemeral=True)
+        await interaction.response.send_message(f"Quote #{id} not found.", ephemeral=True)
         return
 
     if not has_manage_permission(interaction, quote):
@@ -187,7 +192,7 @@ async def qremove(interaction: discord.Interaction, id: int):
 
     await remove_quote(str(interaction.guild_id), id)
     await interaction.response.send_message(
-        "Quote #%d has been removed." % id,
+        f"Quote #{id} has been removed.",
         embed=format_single_quote_embed(quote, interaction.guild),
     )
 
@@ -216,7 +221,7 @@ async def qedit(
 
     if text is not None and len(text) > QUOTE_MAX_LENGTH:
         await interaction.response.send_message(
-            "Quote text must be %d characters or fewer." % QUOTE_MAX_LENGTH,
+            f"Quote text must be {QUOTE_MAX_LENGTH} characters or fewer.",
             ephemeral=True,
         )
         return
@@ -229,7 +234,7 @@ async def qedit(
 
     quote = await get_quote(str(interaction.guild_id), id)
     if not quote:
-        await interaction.response.send_message("Quote #%d not found." % id, ephemeral=True)
+        await interaction.response.send_message(f"Quote #{id} not found.", ephemeral=True)
         return
 
     if not has_manage_permission(interaction, quote):
@@ -246,7 +251,7 @@ async def qedit(
         author_name=author_text,
     )
     embed = format_single_quote_embed(updated, interaction.guild)
-    embed.set_author(name="Quote #%d Updated" % id)
+    embed.set_author(name=f"Quote #{id} Updated")
     embed.color = discord.Color.orange()
     await interaction.response.send_message(embed=embed)
 
@@ -287,7 +292,7 @@ async def qrandom(
 async def qget(interaction: discord.Interaction, id: int):
     quote = await get_quote(str(interaction.guild_id), id)
     if not quote:
-        await interaction.response.send_message("Quote #%d not found." % id, ephemeral=True)
+        await interaction.response.send_message(f"Quote #{id} not found.", ephemeral=True)
         return
 
     await interaction.response.send_message(embed=format_single_quote_embed(quote, interaction.guild))
@@ -327,7 +332,7 @@ async def quser(
         return
 
     author_display = author_user.display_name if author_user else author_text
-    title = "Quotes by %s" % author_display
+    title = f"Quotes by {author_display}"
 
     first_page = await get_quotes_by_author_page(server_id, 0, author_user_id=uid, author_name=name)
     embed = build_page_embed(first_page, 0, total, title)
@@ -351,11 +356,11 @@ async def qsearch(interaction: discord.Interaction, keyword: str):
     total = await count_search_quotes(server_id, keyword)
     if total == 0:
         await interaction.response.send_message(
-            "No quotes found matching \"%s\"." % keyword, ephemeral=True
+            f"No quotes found matching \"{keyword}\".", ephemeral=True
         )
         return
 
-    title = "Search results for \"%s\"" % keyword
+    title = f"Search results for \"{keyword}\""
 
     first_page = await search_quotes_page(server_id, keyword, 0)
     embed = build_page_embed(first_page, 0, total, title)

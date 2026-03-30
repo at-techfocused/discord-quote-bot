@@ -6,11 +6,12 @@ QUOTES_PER_PAGE = 5
 
 def format_quote(quote: dict) -> str:
     author = (
-        "<@%s>" % quote["author_user_id"]
+        f"<@{quote['author_user_id']}>"
         if quote["author_user_id"]
         else quote["author_name"] or "Unknown"
     )
-    return "**Quote #%d**\n> %s\n> \n> ***\u2014*** %s" % (quote["quote_id"], quote["quote_text"], author)
+    # Mobile Fix applied with bold quote header
+    return f"**Quote #{quote['quote_id']}**\n> {quote['quote_text']}\n> \n> ***\u2014*** {author}"
 
 
 def build_page_embed(
@@ -24,7 +25,7 @@ def build_page_embed(
         description=description or "No quotes found.",
         color=discord.Color.blurple(),
     )
-    embed.set_footer(text="Page %d/%d | %d total quotes" % (page + 1, total_pages, total))
+    embed.set_footer(text=f"Page {page + 1}/{total_pages} | {total} total quotes")
     return embed
 
 
