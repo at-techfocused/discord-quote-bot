@@ -55,9 +55,9 @@ async def init_db():
                             SEED_SERVER_ID,
                             i,
                             q["quote_text"],
-                            None,
+                            q.get("author_user_id"),
                             q.get("author_name"),
-                            q.get("added_by", "Unknown"),
+                            q.get("added_by_user_id") or q.get("added_by", "Unknown"),
                             q.get("timestamp", "Unknown"),
                         ),
                     )
