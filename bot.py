@@ -1,4 +1,5 @@
 import os
+import random
 import discord
 from datetime import datetime, timezone
 from discord import app_commands
@@ -14,6 +15,7 @@ load_dotenv()
 QUOTE_MAX_LENGTH = 1000
 
 intents = discord.Intents.default()
+intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
@@ -39,7 +41,16 @@ def format_added_by(quote: dict) -> str:
     return added_by or "Unknown"
 
 
-def format_single_quote_embed(quote: dict) -> discord.Embed:
+def get_embed_color(guild: discord.Guild | None, quote: dict) -> discord.Color:
+    """Get embed color from the author's top role, or random if not a member."""
+    if guild and quote.get("author_user_id"):
+        member = guild.get_member(int(quote["author_user_id"]))
+        if member and member.top_role.color.value != 0:
+            return member.top_role.color
+    return discord.Color.from_rgb(random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+
+
+def format_single_quote_embed(quote: dict, guild: discord.Guild | None = None) -> discord.Embed:
     author = (
         "<@%s>" % quote["author_user_id"]
         if quote["author_user_id"]
@@ -47,12 +58,33 @@ def format_single_quote_embed(quote: dict) -> discord.Embed:
     )
     embed = discord.Embed(
         description="> %s\n> \n> *\u2014 %s*" % (quote["quote_text"], author),
-        color=discord.Color.blurple(),
+        color=get_embed_color(guild, quote),
     )
     embed.set_author(name="Quote #%d" % quote["quote_id"])
-    ts = to_discord_timestamp(quote["timestamp"])
-    embed.add_field(name="Added by", value=format_added_by(quote), inline=True)
-    embed.add_field(name="Date", value=ts, inline=True)
+
+    # Set author's avatar as thumbnail if they're a Discord user
+    if guild and quote.get("author_user_id"):
+        member = guild.get_member(int(quote["author_user_id"]))
+        if member and member.avatar:
+            embed.set_thumbnail(url=member.avatar.url)
+
+    # Metadata in footer (footers don't render mentions, so resolve to display name)
+    added_by_raw = quote["added_by_user_id"]
+    if added_by_raw and added_by_raw.isdigit() and guild:
+        member = guild.get_member(int(added_by_raw))
+        added_by_text = member.display_name if member else "User %s" % added_by_raw
+    else:
+        added_by_text = added_by_raw or "Unknown"
+    # Format date as plain text for footer (Discord formatting doesn't work in footers)
+    ts_plain = quote["timestamp"]
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
+        try:
+            dt = datetime.strptime(ts_plain, fmt)
+            ts_plain = dt.strftime("%m/%d/%Y")
+            break
+        except ValueError:
+            continue
+    embed.set_footer(text="Added by %s \u2022 %s" % (added_by_text, ts_plain))
     return embed
 
 
@@ -140,7 +172,7 @@ async def qremove(interaction: discord.Interaction, id: int):
     await remove_quote(str(interaction.guild_id), id)
     await interaction.response.send_message(
         f"Quote #{id} has been removed.",
-        embed=format_single_quote_embed(quote),
+        embed=format_single_quote_embed(quote, interaction.guild),
     )
 
 
@@ -199,7 +231,7 @@ async def qedit(
         author_user_id=str(author_user.id) if author_user else None,
         author_name=author_text,
     )
-    embed = format_single_quote_embed(updated)
+    embed = format_single_quote_embed(updated, interaction.guild)
     embed.title = f"Quote #{id} Updated"
     embed.color = discord.Color.orange()
     await interaction.response.send_message(embed=embed)
@@ -232,7 +264,7 @@ async def qrandom(
         await interaction.response.send_message("No quotes found.", ephemeral=True)
         return
 
-    await interaction.response.send_message(embed=format_single_quote_embed(quote))
+    await interaction.response.send_message(embed=format_single_quote_embed(quote, interaction.guild))
 
 
 @bot.tree.command(name="qget", description="Get a specific quote by ID")
@@ -246,7 +278,7 @@ async def qget(interaction: discord.Interaction, id: int):
         )
         return
 
-    await interaction.response.send_message(embed=format_single_quote_embed(quote))
+    await interaction.response.send_message(embed=format_single_quote_embed(quote, interaction.guild))
 
 
 @bot.tree.command(name="quser", description="Get all quotes by an author")
