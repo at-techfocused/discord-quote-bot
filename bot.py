@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from database import (
     init_db, close_db, add_quote, remove_quote, edit_quote, get_quote,
     get_random_quote, count_quotes_by_author, get_quotes_by_author_page,
-    count_search_quotes, search_quotes_page, QUOTES_PER_PAGE,
+    count_search_quotes, search_quotes_page, get_unique_author_names, QUOTES_PER_PAGE,
 )
 from paginator import PaginatorView, build_page_embed
 
@@ -26,7 +26,7 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
-# ---- Helpers ----
+# ---- Helpers & UI Views ----
 
 def get_embed_color(guild: discord.Guild | None, quote: dict) -> discord.Color:
     if guild and quote.get("author_user_id"):
@@ -43,7 +43,6 @@ def format_single_quote_embed(quote: dict, guild: discord.Guild | None = None) -
         else quote["author_name"] or "Unknown"
     )
 
-    # Parse timestamp into a timezone-aware datetime object
     ts_plain = quote["timestamp"]
     parsed_dt = None
     for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
@@ -56,35 +55,29 @@ def format_single_quote_embed(quote: dict, guild: discord.Guild | None = None) -
         except ValueError:
             continue
 
-    # Create the embed with the mobile-friendly Hanging Citation and native timestamp
     embed = discord.Embed(
         description=f"> {quote['quote_text']}\n> \n> ***\u2014*** {author_mention}",
         color=get_embed_color(guild, quote),
         timestamp=parsed_dt,
     )
-    
     embed.set_author(name=f"Quote #{quote['quote_id']}")
 
-    # Large Avatar Thumbnail (Fixed for Default Avatars & Departed Users)
+    # Apply Optional Image Attachment
+    if quote.get("image_url"):
+        embed.set_image(url=quote["image_url"])
+
     if quote.get("author_user_id"):
         user_id = int(quote["author_user_id"])
         user = guild.get_member(user_id) if guild else None
-        
-        # Fallback to global cache if they left the server
         if not user:
             user = bot.get_user(user_id)
-            
         if user:
-            # display_avatar guarantees an image URL is returned
             embed.set_thumbnail(url=user.display_avatar.url)
 
-    # Clean Footer with resolved display name
     added_by_raw = quote["added_by_user_id"]
     if added_by_raw and added_by_raw.isdigit():
         user_id = int(added_by_raw)
         user = guild.get_member(user_id) if guild else None
-        
-        # Fallback to global cache if they left the server
         if not user:
             user = bot.get_user(user_id)
             
@@ -102,6 +95,47 @@ def has_manage_permission(interaction: discord.Interaction, quote: dict) -> bool
     perms = interaction.user.guild_permissions
     return perms.administrator or perms.manage_messages
 
+# Interactive Delete Confirmation View
+class ConfirmRemoveView(discord.ui.View):
+    def __init__(self, author_id: int, quote: dict, guild: discord.Guild):
+        super().__init__(timeout=60)
+        self.author_id = author_id
+        self.quote = quote
+        self.guild = guild
+
+    @discord.ui.button(label="Confirm Delete", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message("Only the command user can confirm this.", ephemeral=True)
+            
+        await remove_quote(str(interaction.guild_id), self.quote["quote_id"])
+        
+        for child in self.children:
+            child.disabled = True
+            
+        embed = format_single_quote_embed(self.quote, self.guild)
+        embed.color = discord.Color.red()
+        embed.set_author(name=f"Quote #{self.quote['quote_id']} Deleted")
+        
+        await interaction.response.edit_message(content=None, embed=embed, view=self)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message("Only the command user can cancel this.", ephemeral=True)
+            
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(content="❌ Deletion cancelled.", embed=None, view=self)
+
+
+# ---- Autocomplete Callback ----
+
+async def author_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+    """Provides autocomplete dropdown suggestions for legacy author names."""
+    names = await get_unique_author_names(str(interaction.guild_id), current)
+    return [app_commands.Choice(name=name, value=name) for name in names]
+
 
 # ---- Events ----
 
@@ -110,24 +144,19 @@ async def on_ready():
     await init_db()
     try:
         synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} commands")
+        print(f"Synced {len(synced)} commands (including context menus)")
     except Exception as e:
         print(f"Failed to sync commands: {e}")
     print(f"Bot is ready as {bot.user}")
-
 
 @bot.event
 async def on_close():
     await close_db()
 
-
-# ---- Global Error Handler ----
-
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     logger.error("Command /%s failed: %s", interaction.command.name if interaction.command else "unknown", error)
     traceback.print_exception(type(error), error, error.__traceback__)
-
     message = "Something went wrong. Try again in a moment."
     if interaction.response.is_done():
         await interaction.followup.send(message, ephemeral=True)
@@ -137,32 +166,66 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 
 # ---- Commands ----
 
+@bot.tree.context_menu(name="Save Quote")
+async def save_quote_context(interaction: discord.Interaction, message: discord.Message):
+    """Right-click any message -> Apps -> Save Quote to quickly add it."""
+    text = message.content.strip()
+    image_url = message.attachments[0].url if message.attachments else None
+    
+    if not text and not image_url:
+        await interaction.response.send_message("This message has no text or image to save.", ephemeral=True)
+        return
+
+    if len(text) > QUOTE_MAX_LENGTH:
+        await interaction.response.send_message(f"Message is too long ({len(text)} chars) to save as a quote.", ephemeral=True)
+        return
+
+    quote_id = await add_quote(
+        server_id=str(interaction.guild_id),
+        quote_text=text or "[Image Only]",
+        added_by_user_id=str(interaction.user.id),
+        author_user_id=str(message.author.id),
+        author_name=None,
+        image_url=image_url
+    )
+
+    embed = discord.Embed(
+        description=f"> {text or '[Image Only]'}\n> \n> ***\u2014*** {message.author.mention}",
+        color=discord.Color.green(),
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.set_author(name=f"Quote #{quote_id} Added via Context Menu")
+    embed.set_thumbnail(url=message.author.display_avatar.url)
+    if image_url:
+        embed.set_image(url=image_url)
+    embed.set_footer(text=f"Added by {interaction.user.display_name}")
+    
+    await interaction.response.send_message(embed=embed)
+
+
 @bot.tree.command(name="qadd", description="Add a new quote")
 @app_commands.describe(
     text="The quote text (max 1000 characters)",
     author_user="The Discord user who said the quote",
     author_text="The name of the author (for non-Discord users)",
+    attachment="An optional image to attach to the quote"
 )
+@app_commands.autocomplete(author_text=author_autocomplete)
 @app_commands.guild_only()
 async def qadd(
     interaction: discord.Interaction,
     text: str,
     author_user: discord.User | None = None,
     author_text: str | None = None,
+    attachment: discord.Attachment | None = None
 ):
     if author_user and author_text:
-        await interaction.response.send_message(
-            "Please provide either `author_user` or `author_text`, not both.",
-            ephemeral=True,
-        )
-        return
+        return await interaction.response.send_message("Please provide either `author_user` or `author_text`, not both.", ephemeral=True)
 
     if len(text) > QUOTE_MAX_LENGTH:
-        await interaction.response.send_message(
-            f"Quote text must be {QUOTE_MAX_LENGTH} characters or fewer (yours: {len(text)}).",
-            ephemeral=True,
-        )
-        return
+        return await interaction.response.send_message(f"Quote text must be {QUOTE_MAX_LENGTH} characters or fewer.", ephemeral=True)
+
+    image_url = attachment.url if attachment else None
 
     quote_id = await add_quote(
         server_id=str(interaction.guild_id),
@@ -170,6 +233,7 @@ async def qadd(
         added_by_user_id=str(interaction.user.id),
         author_user_id=str(author_user.id) if author_user else None,
         author_name=author_text,
+        image_url=image_url
     )
 
     author_display = author_user.mention if author_user else author_text or "Unknown"
@@ -181,6 +245,8 @@ async def qadd(
     )
     embed.set_author(name=f"Quote #{quote_id} Added")
     
+    if image_url:
+        embed.set_image(url=image_url)
     if author_user:
         embed.set_thumbnail(url=author_user.display_avatar.url)
         
@@ -194,19 +260,19 @@ async def qadd(
 async def qremove(interaction: discord.Interaction, id: int):
     quote = await get_quote(str(interaction.guild_id), id)
     if not quote:
-        await interaction.response.send_message(f"Quote #{id} not found.", ephemeral=True)
-        return
+        return await interaction.response.send_message(f"Quote #{id} not found.", ephemeral=True)
 
     if not has_manage_permission(interaction, quote):
-        await interaction.response.send_message(
-            "You don't have permission to remove this quote.", ephemeral=True
-        )
-        return
+        return await interaction.response.send_message("You don't have permission to remove this quote.", ephemeral=True)
 
-    await remove_quote(str(interaction.guild_id), id)
+    embed = format_single_quote_embed(quote, interaction.guild)
+    view = ConfirmRemoveView(interaction.user.id, quote, interaction.guild)
+    
     await interaction.response.send_message(
-        f"Quote #{id} has been removed.",
-        embed=format_single_quote_embed(quote, interaction.guild),
+        content="⚠️ **Are you sure you want to permanently delete this quote?**",
+        embed=embed, 
+        view=view,
+        ephemeral=True
     )
 
 
@@ -216,7 +282,9 @@ async def qremove(interaction: discord.Interaction, id: int):
     text="New quote text",
     author_user="New Discord user author",
     author_text="New text author name",
+    attachment="New image attachment (overwrites existing)"
 )
+@app_commands.autocomplete(author_text=author_autocomplete)
 @app_commands.guild_only()
 async def qedit(
     interaction: discord.Interaction,
@@ -224,37 +292,25 @@ async def qedit(
     text: str | None = None,
     author_user: discord.User | None = None,
     author_text: str | None = None,
+    attachment: discord.Attachment | None = None
 ):
     if author_user and author_text:
-        await interaction.response.send_message(
-            "Please provide either `author_user` or `author_text`, not both.",
-            ephemeral=True,
-        )
-        return
+        return await interaction.response.send_message("Please provide either `author_user` or `author_text`, not both.", ephemeral=True)
 
     if text is not None and len(text) > QUOTE_MAX_LENGTH:
-        await interaction.response.send_message(
-            f"Quote text must be {QUOTE_MAX_LENGTH} characters or fewer.",
-            ephemeral=True,
-        )
-        return
+        return await interaction.response.send_message(f"Quote text must be {QUOTE_MAX_LENGTH} characters or fewer.", ephemeral=True)
 
-    if text is None and author_user is None and author_text is None:
-        await interaction.response.send_message(
-            "You must provide at least one field to edit.", ephemeral=True
-        )
-        return
+    if text is None and author_user is None and author_text is None and attachment is None:
+        return await interaction.response.send_message("You must provide at least one field to edit.", ephemeral=True)
 
     quote = await get_quote(str(interaction.guild_id), id)
     if not quote:
-        await interaction.response.send_message(f"Quote #{id} not found.", ephemeral=True)
-        return
+        return await interaction.response.send_message(f"Quote #{id} not found.", ephemeral=True)
 
     if not has_manage_permission(interaction, quote):
-        await interaction.response.send_message(
-            "You don't have permission to edit this quote.", ephemeral=True
-        )
-        return
+        return await interaction.response.send_message("You don't have permission to edit this quote.", ephemeral=True)
+
+    image_url = attachment.url if attachment else None
 
     updated = await edit_quote(
         server_id=str(interaction.guild_id),
@@ -262,6 +318,7 @@ async def qedit(
         quote_text=text,
         author_user_id=str(author_user.id) if author_user else None,
         author_name=author_text,
+        image_url=image_url
     )
     embed = format_single_quote_embed(updated, interaction.guild)
     embed.set_author(name=f"Quote #{id} Updated")
@@ -274,6 +331,7 @@ async def qedit(
     author_user="Filter by Discord user",
     author_text="Filter by text author name",
 )
+@app_commands.autocomplete(author_text=author_autocomplete)
 @app_commands.guild_only()
 async def qrandom(
     interaction: discord.Interaction,
@@ -281,11 +339,7 @@ async def qrandom(
     author_text: str | None = None,
 ):
     if author_user and author_text:
-        await interaction.response.send_message(
-            "Please provide either `author_user` or `author_text`, not both.",
-            ephemeral=True,
-        )
-        return
+        return await interaction.response.send_message("Please provide either `author_user` or `author_text`, not both.", ephemeral=True)
 
     quote = await get_random_quote(
         server_id=str(interaction.guild_id),
@@ -293,8 +347,7 @@ async def qrandom(
         author_name=author_text,
     )
     if not quote:
-        await interaction.response.send_message("No quotes found.", ephemeral=True)
-        return
+        return await interaction.response.send_message("No quotes found.", ephemeral=True)
 
     await interaction.response.send_message(embed=format_single_quote_embed(quote, interaction.guild))
 
@@ -305,8 +358,7 @@ async def qrandom(
 async def qget(interaction: discord.Interaction, id: int):
     quote = await get_quote(str(interaction.guild_id), id)
     if not quote:
-        await interaction.response.send_message(f"Quote #{id} not found.", ephemeral=True)
-        return
+        return await interaction.response.send_message(f"Quote #{id} not found.", ephemeral=True)
 
     await interaction.response.send_message(embed=format_single_quote_embed(quote, interaction.guild))
 
@@ -316,6 +368,7 @@ async def qget(interaction: discord.Interaction, id: int):
     author_user="The Discord user to look up",
     author_text="The text author name to look up",
 )
+@app_commands.autocomplete(author_text=author_autocomplete)
 @app_commands.guild_only()
 async def quser(
     interaction: discord.Interaction,
@@ -323,17 +376,10 @@ async def quser(
     author_text: str | None = None,
 ):
     if author_user and author_text:
-        await interaction.response.send_message(
-            "Please provide either `author_user` or `author_text`, not both.",
-            ephemeral=True,
-        )
-        return
+        return await interaction.response.send_message("Please provide either `author_user` or `author_text`, not both.", ephemeral=True)
 
     if not author_user and not author_text:
-        await interaction.response.send_message(
-            "Please provide an author to search for.", ephemeral=True
-        )
-        return
+        return await interaction.response.send_message("Please provide an author to search for.", ephemeral=True)
 
     server_id = str(interaction.guild_id)
     uid = str(author_user.id) if author_user else None
@@ -341,8 +387,7 @@ async def quser(
 
     total = await count_quotes_by_author(server_id, author_user_id=uid, author_name=name)
     if total == 0:
-        await interaction.response.send_message("No quotes found for that author.", ephemeral=True)
-        return
+        return await interaction.response.send_message("No quotes found for that author.", ephemeral=True)
 
     author_display = author_user.display_name if author_user else author_text
     title = f"Quotes by {author_display}"
@@ -368,10 +413,7 @@ async def qsearch(interaction: discord.Interaction, keyword: str):
 
     total = await count_search_quotes(server_id, keyword)
     if total == 0:
-        await interaction.response.send_message(
-            f"No quotes found matching \"{keyword}\".", ephemeral=True
-        )
-        return
+        return await interaction.response.send_message(f"No quotes found matching \"{keyword}\".", ephemeral=True)
 
     title = f"Search results for \"{keyword}\""
 
@@ -396,12 +438,13 @@ async def qhelp(interaction: discord.Interaction):
         color=discord.Color.blurple(),
     )
     commands_info = [
-        ("/qadd", "`text` `[author_user]` `[author_text]`\nAdd a new quote. Provide either a Discord user or a text name as the author."),
-        ("/qremove", "`id`\nRemove a quote. You must be the one who added it, or have Manage Messages/Admin permissions."),
-        ("/qedit", "`id` `[text]` `[author_user]` `[author_text]`\nEdit a quote's text or author. Same permissions as /qremove."),
+        ("Right-Click Save", "Right-click any message -> Apps -> `Save Quote` to instantly save it."),
+        ("/qadd", "`text` `[author_user]` `[author_text]` `[attachment]`\nAdd a new quote manually. Supports image uploads."),
+        ("/qremove", "`id`\nRemove a quote safely with a confirmation prompt."),
+        ("/qedit", "`id` `[text]` `[author_user]` `[author_text]` `[attachment]`\nEdit a quote's text, author, or image."),
         ("/qrandom", "`[author_user]` `[author_text]`\nGet a random quote, optionally filtered by author."),
         ("/qget", "`id`\nGet a specific quote by its ID."),
-        ("/quser", "`[author_user]` `[author_text]`\nGet all quotes by an author (paginated)."),
+        ("/quser", "`[author_user]` `[author_text]`\nGet all quotes by an author. Features text autocomplete."),
         ("/qsearch", "`keyword`\nSearch quotes by keyword (paginated)."),
     ]
     for name, value in commands_info:

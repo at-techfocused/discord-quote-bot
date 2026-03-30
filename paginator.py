@@ -10,8 +10,11 @@ def format_quote(quote: dict) -> str:
         if quote["author_user_id"]
         else quote["author_name"] or "Unknown"
     )
-    # Mobile Fix applied with bold quote header
-    return f"**Quote #{quote['quote_id']}**\n> {quote['quote_text']}\n> \n> ***\u2014*** {author}"
+    
+    # Indicate visually in the list view if a quote has an image attached
+    image_indicator = " \n> 🖼️ *[Image Attached]*" if quote.get("image_url") else ""
+    
+    return f"**Quote #{quote['quote_id']}**\n> {quote['quote_text']}{image_indicator}\n> \n> ***\u2014*** {author}"
 
 
 def build_page_embed(
