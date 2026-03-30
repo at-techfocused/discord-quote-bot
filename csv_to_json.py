@@ -10,7 +10,7 @@ def main():
     quotes = []
 
     with open(INPUT_FILE, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f, delimiter="\t")
+        reader = csv.DictReader(f)
         for row in reader:
             quotes.append({
                 "old_id": int(row["old_id"]),
