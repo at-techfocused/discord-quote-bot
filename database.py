@@ -1,7 +1,9 @@
+import os
 import aiosqlite
 import datetime
 
-DB_FILE = "quotes.db"
+# Automatically use Railway's DB_PATH variable if it exists, otherwise default to local quotes.db
+DB_FILE = os.getenv("DB_PATH", "quotes.db")
 QUOTES_PER_PAGE = 5
 
 def dict_factory(cursor, row):
@@ -171,7 +173,6 @@ async def search_quotes_page(server_id: str, keyword: str, page: int) -> list:
         ) as cursor:
             return await cursor.fetchall()
 
-# --- New Function for Autocomplete ---
 async def get_unique_author_names(server_id: str, current: str) -> list[str]:
     """Fetches up to 25 unique legacy author names for autocomplete."""
     async with aiosqlite.connect(DB_FILE) as db:
