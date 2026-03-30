@@ -6,11 +6,11 @@ QUOTES_PER_PAGE = 5
 
 def format_quote(quote: dict) -> str:
     author = (
-        f"<@{quote['author_user_id']}>"
+        "<@%s>" % quote["author_user_id"]
         if quote["author_user_id"]
         else quote["author_name"] or "Unknown"
     )
-    return f"**#{quote['quote_id']}** - {author}\n> {quote['quote_text']}"
+    return "**#%d**\n> %s\n> *\u2014 %s*" % (quote["quote_id"], quote["quote_text"], author)
 
 
 def build_page_embed(

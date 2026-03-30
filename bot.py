@@ -1,5 +1,6 @@
 import os
 import discord
+from datetime import datetime, timezone
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -16,20 +17,42 @@ intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
+def to_discord_timestamp(ts_str: str, style: str = "d") -> str:
+    """Convert a timestamp string to Discord's <t:UNIX:style> format.
+    Falls back to the raw string if parsing fails."""
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
+        try:
+            dt = datetime.strptime(ts_str, fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return "<t:%d:%s>" % (int(dt.timestamp()), style)
+        except ValueError:
+            continue
+    return ts_str
+
+
+def format_added_by(quote: dict) -> str:
+    """Format the Added By field. Uses <@ID> for Discord IDs, plain text for legacy names."""
+    added_by = quote["added_by_user_id"]
+    if added_by and added_by.isdigit():
+        return "<@%s>" % added_by
+    return added_by or "Unknown"
+
+
 def format_single_quote_embed(quote: dict) -> discord.Embed:
     author = (
-        f"<@{quote['author_user_id']}>"
+        "<@%s>" % quote["author_user_id"]
         if quote["author_user_id"]
         else quote["author_name"] or "Unknown"
     )
     embed = discord.Embed(
-        title=f"Quote #{quote['quote_id']}",
-        description=f"> {quote['quote_text']}",
+        description="> %s\n> \n> *\u2014 %s*" % (quote["quote_text"], author),
         color=discord.Color.blurple(),
     )
-    embed.add_field(name="Author", value=author, inline=True)
-    embed.add_field(name="Added by", value=f"<@{quote['added_by_user_id']}>", inline=True)
-    embed.set_footer(text=quote["timestamp"])
+    embed.set_author(name="Quote #%d" % quote["quote_id"])
+    ts = to_discord_timestamp(quote["timestamp"])
+    embed.add_field(name="Added by", value=format_added_by(quote), inline=True)
+    embed.add_field(name="Date", value=ts, inline=True)
     return embed
 
 
@@ -90,11 +113,10 @@ async def qadd(
         author_user.mention if author_user else author_text or "Unknown"
     )
     embed = discord.Embed(
-        title=f"Quote #{quote_id} Added",
-        description=f"> {text}",
+        description="> %s\n> \n> *\u2014 %s*" % (text, author_display),
         color=discord.Color.green(),
     )
-    embed.add_field(name="Author", value=author_display, inline=True)
+    embed.set_author(name="Quote #%d Added" % quote_id)
     await interaction.response.send_message(embed=embed)
 
 
