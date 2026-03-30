@@ -22,10 +22,12 @@ logger = logging.getLogger("quote_bot")
 
 QUOTE_MAX_LENGTH = 1000
 REACTION_EMOJI = "🗣️"
+# The list of approved emojis that the bot will allow on its own messages
+APPROVED_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "◀️", "❌", "▶️", REACTION_EMOJI]
 
 intents = discord.Intents.default()
 intents.members = True
-intents.message_content = True # Required for reading message text from reactions
+intents.message_content = True 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
@@ -143,7 +145,7 @@ async def on_ready():
     await init_db()
     try:
         synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} commands (including context menus)")
+        print(f"Synced {len(synced)} commands")
     except Exception as e:
         print(f"Failed to sync commands: {e}")
     print(f"Bot is ready as {bot.user}")
@@ -163,23 +165,14 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         await interaction.response.send_message(message, ephemeral=True)
 
 
-# ---- Reaction Save Event ----
+# ---- Reaction Event ----
 
 @bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
-    # Only run in servers, and only for the designated emoji
-    if not payload.guild_id or str(payload.emoji) != REACTION_EMOJI:
+    # Ignore reactions added by the bot itself
+    if payload.user_id == bot.user.id:
         return
 
-    # Check if this message was already quoted to prevent duplicates
-    server_id = str(payload.guild_id)
-    message_id = str(payload.message_id)
-    
-    is_duplicate = await check_quote_by_message_id(server_id, message_id)
-    if is_duplicate:
-        return # Silently ignore, it's already saved
-
-    # Fetch the channel and message
     channel = bot.get_channel(payload.channel_id)
     if not channel:
         return
@@ -189,7 +182,27 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     except (discord.NotFound, discord.Forbidden):
         return
 
-    # Don't quote the bot itself
+    # NEW: Filter unauthorized manual reactions on the Bot's own messages
+    if message.author.id == bot.user.id:
+        if str(payload.emoji) not in APPROVED_EMOJIS:
+            try:
+                user = payload.member or bot.get_user(payload.user_id)
+                await message.remove_reaction(payload.emoji, user)
+            except discord.Forbidden:
+                pass # Bot needs 'Manage Messages' permission to delete reactions
+        return # Do not attempt to run the Save Quote logic on the bot's own messages
+
+    # Ignore reactions that are not the exact save emoji on other messages
+    if not payload.guild_id or str(payload.emoji) != REACTION_EMOJI:
+        return
+
+    server_id = str(payload.guild_id)
+    message_id = str(payload.message_id)
+    
+    is_duplicate = await check_quote_by_message_id(server_id, message_id)
+    if is_duplicate:
+        return 
+
     if message.author.bot:
         return
 
@@ -200,13 +213,11 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         return
 
     if len(text) > QUOTE_MAX_LENGTH:
-        return # Too long to quote
+        return 
 
-    # Fetch the user who added the reaction
     added_by_user = bot.get_user(payload.user_id)
     added_by_name = added_by_user.display_name if added_by_user else "Unknown User"
 
-    # Save the quote
     quote_id = await add_quote(
         server_id=server_id,
         quote_text=text or "[Image Only]",
@@ -217,7 +228,6 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         original_message_id=message_id
     )
 
-    # Build the confirmation embed
     embed = discord.Embed(
         description=f"> {text or '[Image Only]'}\n> \n> ***\u2014*** {message.author.mention}",
         color=discord.Color.green(),
@@ -229,11 +239,10 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         embed.set_image(url=image_url)
     embed.set_footer(text=f"Added by {added_by_name}")
     
-    # Send confirmation back to the channel as a reply
     try:
         await channel.send(embed=embed, reference=message)
     except discord.Forbidden:
-        pass # Bot doesn't have permission to send messages here
+        pass
 
 
 # ---- Commands ----
@@ -251,7 +260,6 @@ async def save_quote_context(interaction: discord.Interaction, message: discord.
         await interaction.response.send_message(f"Message is too long ({len(text)} chars) to save as a quote.", ephemeral=True)
         return
 
-    # Context menus also check for duplicates!
     server_id = str(interaction.guild_id)
     message_id = str(message.id)
     
@@ -476,14 +484,18 @@ async def quser(
     first_page = await get_quotes_by_author_page(server_id, 0, author_user_id=uid, author_name=name)
     embed = build_page_embed(first_page, 0, total, title)
 
-    if total <= QUOTES_PER_PAGE:
-        await interaction.response.send_message(embed=embed)
-    else:
-        async def fetch_page(page: int) -> list[dict]:
-            return await get_quotes_by_author_page(server_id, page, author_user_id=uid, author_name=name)
+    async def fetch_page(page: int) -> list[dict]:
+        return await get_quotes_by_author_page(server_id, page, author_user_id=uid, author_name=name)
 
-        view = PaginatorView(fetch_page, total, title, interaction.user.id)
-        await interaction.response.send_message(embed=embed, view=view)
+    view = PaginatorView(
+        fetch_page=fetch_page,
+        total=total,
+        title=title,
+        author_id=interaction.user.id,
+        format_single_embed=lambda q: format_single_quote_embed(q, interaction.guild),
+        first_page_quotes=first_page
+    )
+    await interaction.response.send_message(embed=embed, view=view)
 
 
 @bot.tree.command(name="qsearch", description="Search quotes by keyword")
@@ -501,14 +513,18 @@ async def qsearch(interaction: discord.Interaction, keyword: str):
     first_page = await search_quotes_page(server_id, keyword, 0)
     embed = build_page_embed(first_page, 0, total, title)
 
-    if total <= QUOTES_PER_PAGE:
-        await interaction.response.send_message(embed=embed)
-    else:
-        async def fetch_page(page: int) -> list[dict]:
-            return await search_quotes_page(server_id, keyword, page)
+    async def fetch_page(page: int) -> list[dict]:
+        return await search_quotes_page(server_id, keyword, page)
 
-        view = PaginatorView(fetch_page, total, title, interaction.user.id)
-        await interaction.response.send_message(embed=embed, view=view)
+    view = PaginatorView(
+        fetch_page=fetch_page,
+        total=total,
+        title=title,
+        author_id=interaction.user.id,
+        format_single_embed=lambda q: format_single_quote_embed(q, interaction.guild),
+        first_page_quotes=first_page
+    )
+    await interaction.response.send_message(embed=embed, view=view)
 
 
 @bot.tree.command(name="qhelp", description="Show help for the quote bot")
