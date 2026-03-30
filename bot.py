@@ -51,40 +51,60 @@ def get_embed_color(guild: discord.Guild | None, quote: dict) -> discord.Color:
 
 
 def format_single_quote_embed(quote: dict, guild: discord.Guild | None = None) -> discord.Embed:
-    author = (
+    # 1. Determine the inline author text for the hanging citation
+    author_mention = (
         "<@%s>" % quote["author_user_id"]
         if quote["author_user_id"]
         else quote["author_name"] or "Unknown"
     )
-    embed = discord.Embed(
-        description="> %s\n> \n> *\u2014 %s*" % (quote["quote_text"], author),
-        color=get_embed_color(guild, quote),
-    )
-    embed.set_author(name="Quote #%d" % quote["quote_id"])
 
-    # Set author's avatar as thumbnail if they're a Discord user
+    # 2. Parse the timestamp into a timezone-aware datetime object
+    ts_plain = quote["timestamp"]
+    parsed_dt = None
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
+        try:
+            dt = datetime.strptime(ts_plain, fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            parsed_dt = dt
+            break
+        except ValueError:
+            continue
+
+    # 3. Create the embed with the Hanging Citation and native timestamp
+    embed = discord.Embed(
+        title="Quote #%d" % quote["quote_id"],
+        description="> %s\n> \n> ***\u2014 %s***" % (quote["quote_text"], author_mention),
+        color=get_embed_color(guild, quote),
+        timestamp=parsed_dt
+    )
+
+    # 4. Set Author block (Avatar + Name) instead of thumbnail
+    author_display_name = quote["author_name"] or "Unknown"
+    avatar_url = None
+
     if guild and quote.get("author_user_id"):
         member = guild.get_member(int(quote["author_user_id"]))
-        if member and member.avatar:
-            embed.set_thumbnail(url=member.avatar.url)
+        if member:
+            author_display_name = member.display_name
+            if member.avatar:
+                avatar_url = member.avatar.url
 
-    # Metadata in footer (footers don't render mentions, so resolve to display name)
+    if avatar_url:
+        embed.set_author(name=author_display_name, icon_url=avatar_url)
+    else:
+        embed.set_author(name=author_display_name)
+
+    # 5. Clean up the footer (remove the manual date string)
     added_by_raw = quote["added_by_user_id"]
     if added_by_raw and added_by_raw.isdigit() and guild:
         member = guild.get_member(int(added_by_raw))
         added_by_text = member.display_name if member else "User %s" % added_by_raw
     else:
         added_by_text = added_by_raw or "Unknown"
-    # Format date as plain text for footer (Discord formatting doesn't work in footers)
-    ts_plain = quote["timestamp"]
-    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
-        try:
-            dt = datetime.strptime(ts_plain, fmt)
-            ts_plain = dt.strftime("%m/%d/%Y")
-            break
-        except ValueError:
-            continue
-    embed.set_footer(text="Added by %s \u2022 %s" % (added_by_text, ts_plain))
+        
+    embed.set_footer(text="Added by %s" % added_by_text)
+    
     return embed
 
 
@@ -144,11 +164,22 @@ async def qadd(
     author_display = (
         author_user.mention if author_user else author_text or "Unknown"
     )
+    
+    # Updated to match the Hanging Citation formatting
     embed = discord.Embed(
-        description="> %s\n> \n> *\u2014 %s*" % (text, author_display),
+        title="Quote #%d Added" % quote_id,
+        description="> %s\n> \n> ***\u2014 %s***" % (text, author_display),
         color=discord.Color.green(),
+        timestamp=datetime.now(timezone.utc)
     )
-    embed.set_author(name="Quote #%d Added" % quote_id)
+    
+    # Added Author block formatting for confirmation message
+    if author_user:
+        embed.set_author(name=author_user.display_name, icon_url=author_user.avatar.url if author_user.avatar else None)
+    else:
+        embed.set_author(name=author_text or "Unknown")
+        
+    embed.set_footer(text=f"Added by {interaction.user.display_name}")
     await interaction.response.send_message(embed=embed)
 
 

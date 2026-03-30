@@ -10,7 +10,8 @@ def format_quote(quote: dict) -> str:
         if quote["author_user_id"]
         else quote["author_name"] or "Unknown"
     )
-    return "**#%d**\n> %s\n> *\u2014 %s*" % (quote["quote_id"], quote["quote_text"], author)
+    # Updated to use the "Hanging Citation" format to match bot.py
+    return "**Quote #%d**\n> %s\n> \n> ***\u2014 %s***" % (quote["quote_id"], quote["quote_text"], author)
 
 
 def build_page_embed(
@@ -27,6 +28,9 @@ def build_page_embed(
         description=description or "No quotes found.",
         color=discord.Color.blurple(),
     )
+    
+    # We keep the footer as the pagination tracker since 
+    # there are multiple dates/users represented in the list above.
     embed.set_footer(text=f"Page {page + 1}/{total_pages} | {len(quotes)} total quotes")
     return embed
 
