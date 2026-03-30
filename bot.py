@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 from database import init_db, add_quote, remove_quote, edit_quote, get_quote
 from database import get_random_quote, get_quotes_by_author, search_quotes
-from paginator import PaginatorView, build_page_embed, format_quote
+from paginator import PaginatorView, build_page_embed
 
 load_dotenv()
 
@@ -17,28 +17,6 @@ QUOTE_MAX_LENGTH = 1000
 intents = discord.Intents.default()
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
-
-
-def to_discord_timestamp(ts_str: str, style: str = "d") -> str:
-    """Convert a timestamp string to Discord's <t:UNIX:style> format.
-    Falls back to the raw string if parsing fails."""
-    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
-        try:
-            dt = datetime.strptime(ts_str, fmt)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return "<t:%d:%s>" % (int(dt.timestamp()), style)
-        except ValueError:
-            continue
-    return ts_str
-
-
-def format_added_by(quote: dict) -> str:
-    """Format the Added By field. Uses <@ID> for Discord IDs, plain text for legacy names."""
-    added_by = quote["added_by_user_id"]
-    if added_by and added_by.isdigit():
-        return "<@%s>" % added_by
-    return added_by or "Unknown"
 
 
 def get_embed_color(guild: discord.Guild | None, quote: dict) -> discord.Color:
@@ -73,29 +51,20 @@ def format_single_quote_embed(quote: dict, guild: discord.Guild | None = None) -
 
     # 3. Create the embed with the Hanging Citation and native timestamp
     embed = discord.Embed(
-        title="Quote #%d" % quote["quote_id"],
         description="> %s\n> \n> ***\u2014 %s***" % (quote["quote_text"], author_mention),
         color=get_embed_color(guild, quote),
         timestamp=parsed_dt
     )
-
-    # 4. Set Author block (Avatar + Name) instead of thumbnail
-    author_display_name = quote["author_name"] or "Unknown"
-    avatar_url = None
-
+    
+    # 4. Set "Quote #ID" back as the Author header, and use the Thumbnail for the avatar
+    embed.set_author(name="Quote #%d" % quote["quote_id"])
+    
     if guild and quote.get("author_user_id"):
         member = guild.get_member(int(quote["author_user_id"]))
-        if member:
-            author_display_name = member.display_name
-            if member.avatar:
-                avatar_url = member.avatar.url
+        if member and member.avatar:
+            embed.set_thumbnail(url=member.avatar.url)
 
-    if avatar_url:
-        embed.set_author(name=author_display_name, icon_url=avatar_url)
-    else:
-        embed.set_author(name=author_display_name)
-
-    # 5. Clean up the footer (remove the manual date string)
+    # 5. Clean up the footer
     added_by_raw = quote["added_by_user_id"]
     if added_by_raw and added_by_raw.isdigit() and guild:
         member = guild.get_member(int(added_by_raw))
@@ -167,17 +136,15 @@ async def qadd(
     
     # Updated to match the Hanging Citation formatting
     embed = discord.Embed(
-        title="Quote #%d Added" % quote_id,
         description="> %s\n> \n> ***\u2014 %s***" % (text, author_display),
         color=discord.Color.green(),
         timestamp=datetime.now(timezone.utc)
     )
     
-    # Added Author block formatting for confirmation message
-    if author_user:
-        embed.set_author(name=author_user.display_name, icon_url=author_user.avatar.url if author_user.avatar else None)
-    else:
-        embed.set_author(name=author_text or "Unknown")
+    # Put the title back at the top and the avatar back as the thumbnail
+    embed.set_author(name="Quote #%d Added" % quote_id)
+    if author_user and author_user.avatar:
+        embed.set_thumbnail(url=author_user.avatar.url)
         
     embed.set_footer(text=f"Added by {interaction.user.display_name}")
     await interaction.response.send_message(embed=embed)
@@ -263,7 +230,7 @@ async def qedit(
         author_name=author_text,
     )
     embed = format_single_quote_embed(updated, interaction.guild)
-    embed.title = f"Quote #{id} Updated"
+    embed.set_author(name=f"Quote #{id} Updated")
     embed.color = discord.Color.orange()
     await interaction.response.send_message(embed=embed)
 

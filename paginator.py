@@ -1,8 +1,6 @@
 import discord
 
-
 QUOTES_PER_PAGE = 5
-
 
 def format_quote(quote: dict) -> str:
     author = (
@@ -10,9 +8,8 @@ def format_quote(quote: dict) -> str:
         if quote["author_user_id"]
         else quote["author_name"] or "Unknown"
     )
-    # Updated to use the "Hanging Citation" format to match bot.py
+    # Uses the "Hanging Citation" format to match bot.py
     return "**Quote #%d**\n> %s\n> \n> ***\u2014 %s***" % (quote["quote_id"], quote["quote_text"], author)
-
 
 def build_page_embed(
     quotes: list[dict], page: int, title: str = "Quotes"
@@ -29,11 +26,8 @@ def build_page_embed(
         color=discord.Color.blurple(),
     )
     
-    # We keep the footer as the pagination tracker since 
-    # there are multiple dates/users represented in the list above.
     embed.set_footer(text=f"Page {page + 1}/{total_pages} | {len(quotes)} total quotes")
     return embed
-
 
 class PaginatorView(discord.ui.View):
     def __init__(self, quotes: list[dict], title: str, author_id: int):
