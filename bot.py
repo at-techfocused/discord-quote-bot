@@ -182,15 +182,15 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     except (discord.NotFound, discord.Forbidden):
         return
 
-    # NEW: Filter unauthorized manual reactions on the Bot's own messages
+    # Filter unauthorized manual reactions on the Bot's own messages
     if message.author.id == bot.user.id:
         if str(payload.emoji) not in APPROVED_EMOJIS:
             try:
                 user = payload.member or bot.get_user(payload.user_id)
                 await message.remove_reaction(payload.emoji, user)
             except discord.Forbidden:
-                pass # Bot needs 'Manage Messages' permission to delete reactions
-        return # Do not attempt to run the Save Quote logic on the bot's own messages
+                pass 
+        return 
 
     # Ignore reactions that are not the exact save emoji on other messages
     if not payload.guild_id or str(payload.emoji) != REACTION_EMOJI:
@@ -487,6 +487,7 @@ async def quser(
     async def fetch_page(page: int) -> list[dict]:
         return await get_quotes_by_author_page(server_id, page, author_user_id=uid, author_name=name)
 
+    # NEW: Updated to pass the correct 6 arguments to PaginatorView
     view = PaginatorView(
         fetch_page=fetch_page,
         total=total,
@@ -516,6 +517,7 @@ async def qsearch(interaction: discord.Interaction, keyword: str):
     async def fetch_page(page: int) -> list[dict]:
         return await search_quotes_page(server_id, keyword, page)
 
+    # NEW: Updated to pass the correct 6 arguments to PaginatorView
     view = PaginatorView(
         fetch_page=fetch_page,
         total=total,

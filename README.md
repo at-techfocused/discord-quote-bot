@@ -1,115 +1,48 @@
-# Discord Quote Bot
+# Discord Quote Bot 💬
 
-A Discord bot for storing, managing, and retrieving user-generated quotes. Supports both active Discord members and legacy/non-Discord authors, with full multi-server data isolation.
+A robust, highly interactive Discord bot designed to immortalize your community's best inside jokes and memorable moments. Built with modern Discord UI standards, it utilizes Slash Commands, Context Menus, Reaction listeners, and a highly optimized SQLite backend to ensure fast, reliable quote retrieval.
 
-## Features
+## ✨ Core Features
 
-- **8 Slash Commands** — Add, remove, edit, search, and browse quotes
-- **Multi-Server Isolation** — Quotes are scoped per server with independent sequential IDs
-- **Hybrid Author System** — Supports both `@User` mentions (stored as Discord IDs, rendered as clickable pings) and plain text names for legacy/non-Discord authors
-- **Paginated Results** — Interactive Previous/Next buttons for browsing large result sets
-- **Permission System** — Only the quote adder or users with Admin/Manage Messages can edit/remove
-- **Rich Embeds** — Citation-style formatting, dynamic role-based border colors, author avatar thumbnails, Discord-native timestamps
-- **Legacy Data Import** — Tools to scrape and migrate quotes from older bots
+* **Frictionless Saving** — Save quotes actively via `/qadd`, instantly via right-clicking a message (`Apps -> Save Quote`), or passively by reacting to any message with a 🗣️ emoji.
+* **Shareable Image Generation** — Use `/qimage` to instantly generate a custom, stylized PNG graphic of any quote (complete with circular avatars and dates) for easy sharing outside of Discord.
+* **Hybrid Author Autocomplete** — Attributes quotes to active Discord members (via clickable `@User` pings) or legacy/non-Discord users. Slash commands feature dynamic database autocomplete for legacy names.
+* **Smart UI & Interactive Pagination** — Browse quotes using numbered emoji buttons (1️⃣, 2️⃣, 3️⃣) to instantly expand list results into detailed, rich embeds. 
+* **Media Support** — Quotes aren't just text. Attach images via slash commands, context menus, or reactions, and the bot will archive and display the media alongside the quote.
+* **Optimized Architecture** — Features stateless SQLite `LIMIT/OFFSET` pagination for low memory usage, duplicate-save prevention, and automatic database schema migrations.
+* **Role-Based Security** — Quotes can only be deleted (via an interactive confirmation prompt) or edited by the original submitter or a user with Server Administrator/Manage Messages permissions.
 
-## Commands
+## 🛠️ Commands & Interactions
 
+### Interactions
+| Action | Description |
+| :--- | :--- |
+| **Reaction Save** | React to any message with 🗣️ to instantly save it. (Prevents duplicates automatically). |
+| **Context Menu** | Right-click (or long-press) any message -> Apps -> `Save Quote`. |
+
+### Slash Commands
 | Command | Parameters | Description |
-|---------|-----------|-------------|
-| `/qadd` | `text` `[author_user]` `[author_text]` | Add a new quote (max 1000 chars). Provide either a Discord user or text name as author. |
-| `/qremove` | `id` | Remove a quote by ID. Requires being the adder or having Manage Messages/Admin. |
-| `/qedit` | `id` `[text]` `[author_user]` `[author_text]` | Edit a quote's text or author. Same permissions as `/qremove`. |
-| `/qrandom` | `[author_user]` `[author_text]` | Pull a random quote, optionally filtered by author. |
-| `/qget` | `id` | Retrieve a specific quote by its server-scoped ID. |
-| `/quser` | `[author_user]` `[author_text]` | List all quotes by an author (paginated). |
-| `/qsearch` | `keyword` | Search quote text by keyword (paginated). |
-| `/qhelp` | — | Display the bot usage guide. |
+| :--- | :--- | :--- |
+| `/qadd` | `text` `[author_user]` `[author_text]` `[attachment]` | Add a new quote manually. Provide either a Discord user or text name. |
+| `/qimage` | `id` | Generates and uploads a stylized, shareable PNG graphic of a specific quote. |
+| `/qremove` | `id` | Delete a quote by ID. Prompts a Red/Gray button confirmation screen. |
+| `/qedit` | `id` `[text]` `[author_user]` `[author_text]` `[attachment]` | Edit an existing quote's text, author, or image. |
+| `/qrandom` | `[author_user]` `[author_text]` | Pull a random quote, optionally filtered by a specific author. |
+| `/qget` | `id` | Retrieve a specific quote by its server-scoped ID number. |
+| `/quser` | `[author_user]` `[author_text]` | Browse all quotes attributed to a specific author (Interactive Paginator). |
+| `/qsearch` | `keyword` | Search all quote text for a specific keyword (Interactive Paginator). |
+| `/qhelp` | — | Display the bot usage guide and command syntax. |
 
-## Setup
+## 🚀 Setup & Installation
 
-### 1. Create a Discord Bot
+### 1. Create the Discord Application
+1. Go to the [Discord Developer Portal](https://discord.com/developers/applications).
+2. Create a new Application, add a Bot, and copy the **Bot Token**.
+3. Under **Privileged Gateway Intents**, enable **Server Members Intent** (for fetching avatars) and **Message Content Intent** (for reading text from reactions).
+4. Go to **OAuth2 > URL Generator**, select the `bot` and `applications.commands` scopes, and grant *Manage Messages*, *Send Messages*, *Attach Files*, *Embed Links*, and *Use Slash Commands* permissions. 
 
-1. Go to the [Discord Developer Portal](https://discord.com/developers/applications)
-2. Create a new Application and add a Bot
-3. Copy the **Bot Token**
-4. Under **Privileged Gateway Intents**, enable **Server Members Intent** (needed for avatar/role color lookups)
-5. Go to **OAuth2 > URL Generator**:
-   - Scopes: `bot`, `applications.commands`
-   - Bot Permissions: Send Messages, Embed Links, Use Slash Commands
-6. Copy the generated URL, open it in your browser, and invite the bot to your server
-
-### 2. Install Dependencies
-
+### 2. Local Environment
 ```bash
 python -m venv venv
 source venv/bin/activate  # or venv\Scripts\activate on Windows
 pip install -r requirements.txt
-```
-
-### 3. Configure Environment
-
-```bash
-cp .env.example .env
-# Edit .env and add your bot token
-```
-
-### 4. Run
-
-```bash
-python bot.py
-```
-
-The bot automatically creates the SQLite database, syncs slash commands, and seeds any legacy data from `cleaned_quotes.json` on first run.
-
-## Deployment (Railway)
-
-The bot is configured for Railway with a `Procfile` and `runtime.txt`.
-
-1. Connect your GitHub repo in [Railway](https://railway.com)
-2. Add env var: `DISCORD_BOT_TOKEN`
-3. Add a Volume mounted at `/data`
-4. Add env var: `DB_PATH=/data/quotes.db`
-5. Railway auto-deploys on every push
-
-## Data Migration Tools
-
-For migrating quotes from an older bot:
-
-| Script | Purpose |
-|--------|---------|
-| `scraper.py` | Searches Discord message history via the search API for old bot embeds, exports to JSON/TXT |
-| `csv_to_json.py` | Converts a CSV of quotes (with Discord user IDs) to `cleaned_quotes.json` |
-| `import_quotes.py` | Cleans scraped data, detects duplicates, and imports into the database |
-
-Place `cleaned_quotes.json` in the repo root and the bot will auto-seed on first startup if the database is empty.
-
-## Project Structure
-
-```
-bot.py              # Main bot — slash commands, embeds, event handlers
-database.py         # Async SQLite layer — CRUD operations, auto-seed
-paginator.py        # Paginated embed UI with Previous/Next buttons
-scraper.py          # Discord search API scraper for legacy quote migration
-csv_to_json.py      # CSV-to-JSON converter for quote data
-import_quotes.py    # Data cleaning, dedup, and database import tool
-tests/              # Database unit tests (22 tests)
-Procfile            # Railway deployment config
-runtime.txt         # Python version for Railway
-```
-
-## Next Phase Ideas
-
-### 1. Quote Reactions and Favorites
-Let users react to a quote with a star or emoji to "favorite" it. Add `/qfavorites` to show a user's saved quotes and `/qtop` to display the most-favorited quotes in the server. Tracks engagement and surfaces the best content.
-
-### 2. Quote of the Day
-Scheduled daily post to a designated channel with a random quote. Configurable via `/qotd set #channel` and `/qotd disable`. Uses Discord scheduled events or a background task loop. Keeps the server active and resurfaces old quotes.
-
-### 3. Author Leaderboard and Stats
-Add `/qstats` to show server-wide quote statistics: most quoted author, most active adder, total quote count, quotes per month graph. Add `/qstats @user` for individual breakdowns. Gives the community a fun competitive element.
-
-### 4. Quote Tags and Categories
-Allow optional tags when adding quotes (`/qadd text:"..." author:@user tags:"funny, sports"`). Add `/qtag funny` to browse by tag. Enables better organization and discovery beyond keyword search, especially as the quote count grows.
-
-### 5. Multi-Format Export
-Add `/qexport` (admin-only) to export all server quotes as a downloadable CSV or JSON file attachment. Useful for backups, migration to another bot, or archiving. Could also support `/qimport` to bulk-load from an uploaded file directly in Discord.
