@@ -11,7 +11,8 @@ from dotenv import load_dotenv
 from database import (
     init_db, close_db, add_quote, remove_quote, edit_quote, get_quote,
     get_random_quote, count_quotes_by_author, get_quotes_by_author_page,
-    count_search_quotes, search_quotes_page, get_unique_author_names, QUOTES_PER_PAGE,
+    count_search_quotes, search_quotes_page, get_unique_author_names, 
+    check_quote_by_message_id, QUOTES_PER_PAGE,
 )
 from paginator import PaginatorView, build_page_embed
 
@@ -20,9 +21,11 @@ load_dotenv()
 logger = logging.getLogger("quote_bot")
 
 QUOTE_MAX_LENGTH = 1000
+REACTION_EMOJI = "🗣️"
 
 intents = discord.Intents.default()
 intents.members = True
+intents.message_content = True # Required for reading message text from reactions
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
@@ -62,7 +65,6 @@ def format_single_quote_embed(quote: dict, guild: discord.Guild | None = None) -
     )
     embed.set_author(name=f"Quote #{quote['quote_id']}")
 
-    # Apply Optional Image Attachment
     if quote.get("image_url"):
         embed.set_image(url=quote["image_url"])
 
@@ -95,7 +97,7 @@ def has_manage_permission(interaction: discord.Interaction, quote: dict) -> bool
     perms = interaction.user.guild_permissions
     return perms.administrator or perms.manage_messages
 
-# Interactive Delete Confirmation View
+
 class ConfirmRemoveView(discord.ui.View):
     def __init__(self, author_id: int, quote: dict, guild: discord.Guild):
         super().__init__(timeout=60)
@@ -129,10 +131,7 @@ class ConfirmRemoveView(discord.ui.View):
         await interaction.response.edit_message(content="❌ Deletion cancelled.", embed=None, view=self)
 
 
-# ---- Autocomplete Callback ----
-
 async def author_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
-    """Provides autocomplete dropdown suggestions for legacy author names."""
     names = await get_unique_author_names(str(interaction.guild_id), current)
     return [app_commands.Choice(name=name, value=name) for name in names]
 
@@ -164,11 +163,83 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         await interaction.response.send_message(message, ephemeral=True)
 
 
+# ---- Reaction Save Event ----
+
+@bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    # Only run in servers, and only for the designated emoji
+    if not payload.guild_id or str(payload.emoji) != REACTION_EMOJI:
+        return
+
+    # Check if this message was already quoted to prevent duplicates
+    server_id = str(payload.guild_id)
+    message_id = str(payload.message_id)
+    
+    is_duplicate = await check_quote_by_message_id(server_id, message_id)
+    if is_duplicate:
+        return # Silently ignore, it's already saved
+
+    # Fetch the channel and message
+    channel = bot.get_channel(payload.channel_id)
+    if not channel:
+        return
+        
+    try:
+        message = await channel.fetch_message(payload.message_id)
+    except (discord.NotFound, discord.Forbidden):
+        return
+
+    # Don't quote the bot itself
+    if message.author.bot:
+        return
+
+    text = message.content.strip()
+    image_url = message.attachments[0].url if message.attachments else None
+    
+    if not text and not image_url:
+        return
+
+    if len(text) > QUOTE_MAX_LENGTH:
+        return # Too long to quote
+
+    # Fetch the user who added the reaction
+    added_by_user = bot.get_user(payload.user_id)
+    added_by_name = added_by_user.display_name if added_by_user else "Unknown User"
+
+    # Save the quote
+    quote_id = await add_quote(
+        server_id=server_id,
+        quote_text=text or "[Image Only]",
+        added_by_user_id=str(payload.user_id),
+        author_user_id=str(message.author.id),
+        author_name=None,
+        image_url=image_url,
+        original_message_id=message_id
+    )
+
+    # Build the confirmation embed
+    embed = discord.Embed(
+        description=f"> {text or '[Image Only]'}\n> \n> ***\u2014*** {message.author.mention}",
+        color=discord.Color.green(),
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.set_author(name=f"Quote #{quote_id} Added via Reaction")
+    embed.set_thumbnail(url=message.author.display_avatar.url)
+    if image_url:
+        embed.set_image(url=image_url)
+    embed.set_footer(text=f"Added by {added_by_name}")
+    
+    # Send confirmation back to the channel as a reply
+    try:
+        await channel.send(embed=embed, reference=message)
+    except discord.Forbidden:
+        pass # Bot doesn't have permission to send messages here
+
+
 # ---- Commands ----
 
 @bot.tree.context_menu(name="Save Quote")
 async def save_quote_context(interaction: discord.Interaction, message: discord.Message):
-    """Right-click any message -> Apps -> Save Quote to quickly add it."""
     text = message.content.strip()
     image_url = message.attachments[0].url if message.attachments else None
     
@@ -180,13 +251,23 @@ async def save_quote_context(interaction: discord.Interaction, message: discord.
         await interaction.response.send_message(f"Message is too long ({len(text)} chars) to save as a quote.", ephemeral=True)
         return
 
+    # Context menus also check for duplicates!
+    server_id = str(interaction.guild_id)
+    message_id = str(message.id)
+    
+    is_duplicate = await check_quote_by_message_id(server_id, message_id)
+    if is_duplicate:
+        await interaction.response.send_message("This message has already been saved as a quote!", ephemeral=True)
+        return
+
     quote_id = await add_quote(
-        server_id=str(interaction.guild_id),
+        server_id=server_id,
         quote_text=text or "[Image Only]",
         added_by_user_id=str(interaction.user.id),
         author_user_id=str(message.author.id),
         author_name=None,
-        image_url=image_url
+        image_url=image_url,
+        original_message_id=message_id
     )
 
     embed = discord.Embed(
@@ -438,6 +519,7 @@ async def qhelp(interaction: discord.Interaction):
         color=discord.Color.blurple(),
     )
     commands_info = [
+        ("Reaction Save", "React to any message with 🗣️ to instantly save it as a quote."),
         ("Right-Click Save", "Right-click any message -> Apps -> `Save Quote` to instantly save it."),
         ("/qadd", "`text` `[author_user]` `[author_text]` `[attachment]`\nAdd a new quote manually. Supports image uploads."),
         ("/qremove", "`id`\nRemove a quote safely with a confirmation prompt."),
