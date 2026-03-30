@@ -65,17 +65,30 @@ def format_single_quote_embed(quote: dict, guild: discord.Guild | None = None) -
     
     embed.set_author(name=f"Quote #{quote['quote_id']}")
 
-    # Large Avatar Thumbnail
-    if guild and quote.get("author_user_id"):
-        member = guild.get_member(int(quote["author_user_id"]))
-        if member and member.avatar:
-            embed.set_thumbnail(url=member.avatar.url)
+    # Large Avatar Thumbnail (Fixed for Default Avatars & Departed Users)
+    if quote.get("author_user_id"):
+        user_id = int(quote["author_user_id"])
+        user = guild.get_member(user_id) if guild else None
+        
+        # Fallback to global cache if they left the server
+        if not user:
+            user = bot.get_user(user_id)
+            
+        if user:
+            # display_avatar guarantees an image URL is returned
+            embed.set_thumbnail(url=user.display_avatar.url)
 
     # Clean Footer with resolved display name
     added_by_raw = quote["added_by_user_id"]
-    if added_by_raw and added_by_raw.isdigit() and guild:
-        member = guild.get_member(int(added_by_raw))
-        added_by_text = member.display_name if member else f"User {added_by_raw}"
+    if added_by_raw and added_by_raw.isdigit():
+        user_id = int(added_by_raw)
+        user = guild.get_member(user_id) if guild else None
+        
+        # Fallback to global cache if they left the server
+        if not user:
+            user = bot.get_user(user_id)
+            
+        added_by_text = user.display_name if user else f"User {added_by_raw}"
     else:
         added_by_text = added_by_raw or "Unknown"
 
@@ -168,8 +181,8 @@ async def qadd(
     )
     embed.set_author(name=f"Quote #{quote_id} Added")
     
-    if author_user and author_user.avatar:
-        embed.set_thumbnail(url=author_user.avatar.url)
+    if author_user:
+        embed.set_thumbnail(url=author_user.display_avatar.url)
         
     embed.set_footer(text=f"Added by {interaction.user.display_name}")
     await interaction.response.send_message(embed=embed)
