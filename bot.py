@@ -548,18 +548,17 @@ async def qhelp(interaction: discord.Interaction):
     embed.set_footer(text="Quotes are server-specific. IDs are unique per server.")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @bot.tree.command(name="qswap", description="[ADMIN ONLY] Swap two quote IDs")
+
+@bot.tree.command(name="qswap", description="[ADMIN ONLY] Swap two quote IDs")
 @app_commands.describe(id1="First quote ID", id2="Second quote ID")
-@app_commands.default_permissions(administrator=True) # Locks command to Server Admins
+@app_commands.default_permissions(administrator=True)
 @app_commands.guild_only()
 async def qswap(interaction: discord.Interaction, id1: int, id2: int):
-    # 1. Fetch the DB connection directly for this custom transaction
     import aiosqlite
-    from database import DB_FILE # Pulls your Railway DB path
+    from database import DB_FILE 
     
     server_id = str(interaction.guild_id)
 
-    # 2. Verify both quotes actually exist first
     from database import get_quote
     q1 = await get_quote(server_id, id1)
     q2 = await get_quote(server_id, id2)
@@ -567,17 +566,10 @@ async def qswap(interaction: discord.Interaction, id1: int, id2: int):
     if not q1 or not q2:
         return await interaction.response.send_message("❌ Cannot swap: One or both of those quote IDs do not exist.", ephemeral=True)
 
-    # 3. Perform the 3-step ID swap using a temporary placeholder (999999)
     async with aiosqlite.connect(DB_FILE) as db:
-        # Step A: Move id1 to a temporary safe space
         await db.execute("UPDATE quotes SET quote_id = 999999 WHERE server_id = ? AND quote_id = ?", (server_id, id1))
-        
-        # Step B: Move id2 into id1's old spot
         await db.execute("UPDATE quotes SET quote_id = ? WHERE server_id = ? AND quote_id = ?", (id1, server_id, id2))
-        
-        # Step C: Move the temporary quote into id2's old spot
         await db.execute("UPDATE quotes SET quote_id = ? WHERE server_id = ? AND quote_id = 999999", (id2, server_id))
-        
         await db.commit()
 
     await interaction.response.send_message(f"✅ Successfully swapped **Quote #{id1}** and **Quote #{id2}**!", ephemeral=True)
