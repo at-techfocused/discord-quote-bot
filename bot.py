@@ -22,7 +22,6 @@ logger = logging.getLogger("quote_bot")
 
 QUOTE_MAX_LENGTH = 1000
 REACTION_EMOJI = "🗣️"
-# The list of approved emojis that the bot will allow on its own messages
 APPROVED_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "◀️", "❌", "▶️", REACTION_EMOJI]
 
 intents = discord.Intents.default()
@@ -169,7 +168,6 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 
 @bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
-    # Ignore reactions added by the bot itself
     if payload.user_id == bot.user.id:
         return
 
@@ -192,7 +190,6 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
                 pass 
         return 
 
-    # Ignore reactions that are not the exact save emoji on other messages
     if not payload.guild_id or str(payload.emoji) != REACTION_EMOJI:
         return
 
@@ -487,7 +484,6 @@ async def quser(
     async def fetch_page(page: int) -> list[dict]:
         return await get_quotes_by_author_page(server_id, page, author_user_id=uid, author_name=name)
 
-    # NEW: Updated to pass the correct 6 arguments to PaginatorView
     view = PaginatorView(
         fetch_page=fetch_page,
         total=total,
@@ -517,7 +513,6 @@ async def qsearch(interaction: discord.Interaction, keyword: str):
     async def fetch_page(page: int) -> list[dict]:
         return await search_quotes_page(server_id, keyword, page)
 
-    # NEW: Updated to pass the correct 6 arguments to PaginatorView
     view = PaginatorView(
         fetch_page=fetch_page,
         total=total,

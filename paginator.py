@@ -4,17 +4,22 @@ from typing import Callable, Awaitable
 QUOTES_PER_PAGE = 5
 
 
-def format_quote(quote: dict) -> str:
+def format_quote(index: int, quote: dict) -> str:
     author = (
         f"<@{quote['author_user_id']}>"
         if quote["author_user_id"]
         else quote["author_name"] or "Unknown"
     )
     
-    # Indicate visually in the list view if a quote has an image attached
     image_indicator = " \n> 🖼️ *[Image Attached]*" if quote.get("image_url") else ""
     
-    return f"**Quote #{quote['quote_id']}**\n> {quote['quote_text']}{image_indicator}\n> \n> ***\u2014*** {author}"
+    # CRITICAL FIX: Truncate long quotes in the list view to prevent 
+    # exceeding Discord's strict 4096 character limit for embeds.
+    text = quote['quote_text']
+    if len(text) > 200:
+        text = text[:197] + "..."
+    
+    return f"**{index}. Quote #{quote['quote_id']}**\n> {text}{image_indicator}\n> \n> ***\u2014*** {author}"
 
 
 def build_page_embed(
@@ -22,7 +27,8 @@ def build_page_embed(
 ) -> discord.Embed:
     total_pages = max(1, (total + QUOTES_PER_PAGE - 1) // QUOTES_PER_PAGE)
 
-    description = "\n\n".join(format_quote(q) for q in quotes)
+    description = "\n\n".join(format_quote(i + 1, q) for i, q in enumerate(quotes))
+    
     embed = discord.Embed(
         title=title,
         description=description or "No quotes found.",
@@ -33,7 +39,7 @@ def build_page_embed(
 
 
 class PaginatorView(discord.ui.View):
-    """Stateless paginator that queries the DB on each page turn."""
+    """Stateless paginator with dynamic emoji buttons for selection and deletion."""
 
     def __init__(
         self,
@@ -41,6 +47,8 @@ class PaginatorView(discord.ui.View):
         total: int,
         title: str,
         author_id: int,
+        format_single_embed: Callable[[dict], discord.Embed],
+        first_page_quotes: list[dict]
     ):
         super().__init__(timeout=120)
         self.fetch_page = fetch_page
@@ -48,42 +56,72 @@ class PaginatorView(discord.ui.View):
         self.title = title
         self.page = 0
         self.author_id = author_id
+        self.format_single_embed = format_single_embed
         self.total_pages = max(1, (total + QUOTES_PER_PAGE - 1) // QUOTES_PER_PAGE)
-        self._update_buttons()
+        self.current_quotes = first_page_quotes
+        
+        self.build_ui()
 
-    def _update_buttons(self):
-        self.prev_button.disabled = self.page <= 0
-        self.next_button.disabled = self.page >= self.total_pages - 1
+    def build_ui(self):
+        self.clear_items()
+        
+        number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
 
-    async def _refresh(self, interaction: discord.Interaction):
-        quotes = await self.fetch_page(self.page)
-        self._update_buttons()
-        embed = build_page_embed(quotes, self.page, self.total, self.title)
-        await interaction.response.edit_message(embed=embed, view=self)
+        # Row 0: The numbered buttons corresponding to the quotes on the page
+        for i, quote in enumerate(self.current_quotes):
+            btn = discord.ui.Button(emoji=number_emojis[i], style=discord.ButtonStyle.primary, row=0)
+            btn.callback = self.generate_select_callback(i)
+            self.add_item(btn)
 
-    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary)
-    async def prev_button(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ):
+        # Row 1: The pagination controls and the Red X delete button
+        prev_btn = discord.ui.Button(emoji="◀️", style=discord.ButtonStyle.secondary, row=1, disabled=self.page <= 0)
+        prev_btn.callback = self.on_prev_page
+        self.add_item(prev_btn)
+
+        close_btn = discord.ui.Button(emoji="❌", style=discord.ButtonStyle.danger, row=1)
+        close_btn.callback = self.on_close
+        self.add_item(close_btn)
+
+        next_btn = discord.ui.Button(emoji="▶️", style=discord.ButtonStyle.secondary, row=1, disabled=self.page >= self.total_pages - 1)
+        next_btn.callback = self.on_next_page
+        self.add_item(next_btn)
+
+    def generate_select_callback(self, index: int):
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id != self.author_id:
+                return await interaction.response.send_message("Only the command user can expand a quote.", ephemeral=True)
+                
+            selected_quote = self.current_quotes[index]
+            single_embed = self.format_single_embed(selected_quote)
+            
+            # Instantly overwrite the list with the full quote embed and remove buttons
+            await interaction.response.edit_message(embed=single_embed, view=None)
+            
+        return callback
+
+    async def on_close(self, interaction: discord.Interaction):
         if interaction.user.id != self.author_id:
-            await interaction.response.send_message(
-                "Only the command author can navigate pages.", ephemeral=True
-            )
-            return
+            return await interaction.response.send_message("Only the command user can close this search.", ephemeral=True)
+        await interaction.message.delete()
+
+    async def on_prev_page(self, interaction: discord.Interaction):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message("Only the command user can navigate pages.", ephemeral=True)
         self.page -= 1
         await self._refresh(interaction)
 
-    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary)
-    async def next_button(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ):
+    async def on_next_page(self, interaction: discord.Interaction):
         if interaction.user.id != self.author_id:
-            await interaction.response.send_message(
-                "Only the command author can navigate pages.", ephemeral=True
-            )
-            return
+            return await interaction.response.send_message("Only the command user can navigate pages.", ephemeral=True)
         self.page += 1
         await self._refresh(interaction)
+
+    async def _refresh(self, interaction: discord.Interaction):
+        self.current_quotes = await self.fetch_page(self.page)
+        self.build_ui()
+        
+        embed = build_page_embed(self.current_quotes, self.page, self.total, self.title)
+        await interaction.response.edit_message(embed=embed, view=self)
 
     async def on_timeout(self):
         for child in self.children:
