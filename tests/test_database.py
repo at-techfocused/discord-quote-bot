@@ -2,33 +2,30 @@ import os
 import pytest
 import asyncio
 
-# Use a temporary database for tests
-os.environ["DB_PATH"] = ":memory:"
-
 from database import (
     init_db,
+    close_db,
     add_quote,
     get_quote,
     remove_quote,
     edit_quote,
     get_random_quote,
-    get_quotes_by_author,
-    search_quotes,
-    DB_PATH,
+    count_quotes_by_author,
+    get_quotes_by_author_page,
+    count_search_quotes,
+    search_quotes_page,
 )
-
-# Since we use :memory:, we need a persistent connection for tests.
-# Override DB_PATH won't work with :memory: across connections.
-# Instead, use a temp file.
-import tempfile
+import database
 
 
 @pytest.fixture(autouse=True)
 def setup_db(tmp_path, monkeypatch):
     db_file = str(tmp_path / "test.db")
-    monkeypatch.setattr("database.DB_PATH", db_file)
+    monkeypatch.setattr(database, "DB_PATH", db_file)
+    monkeypatch.setattr(database, "_db", None)
     asyncio.get_event_loop().run_until_complete(init_db())
     yield
+    asyncio.get_event_loop().run_until_complete(close_db())
 
 
 def run(coro):
@@ -136,34 +133,52 @@ class TestRandomQuote:
         assert quote["author_user_id"] == "authorA"
 
 
-class TestSearchQuotes:
-    def test_search_match(self):
-        run(add_quote("s1", "The quick brown fox", "u1"))
-        run(add_quote("s1", "Lazy dog", "u1"))
-        results = run(search_quotes("s1", "quick"))
-        assert len(results) == 1
-        assert "quick" in results[0]["quote_text"]
+class TestPaginatedSearch:
+    def test_count_and_page(self):
+        for i in range(12):
+            run(add_quote("s1", "Quote %d about cats" % i, "u1"))
+        run(add_quote("s1", "About dogs", "u1"))
+
+        count = run(count_search_quotes("s1", "cats"))
+        assert count == 12
+
+        page0 = run(search_quotes_page("s1", "cats", 0))
+        assert len(page0) == 5
+
+        page1 = run(search_quotes_page("s1", "cats", 1))
+        assert len(page1) == 5
+
+        page2 = run(search_quotes_page("s1", "cats", 2))
+        assert len(page2) == 2
 
     def test_search_no_match(self):
         run(add_quote("s1", "Hello", "u1"))
-        results = run(search_quotes("s1", "xyz"))
-        assert len(results) == 0
+        count = run(count_search_quotes("s1", "xyz"))
+        assert count == 0
 
     def test_search_server_isolation(self):
         run(add_quote("s1", "Shared text", "u1"))
-        results = run(search_quotes("s2", "Shared"))
-        assert len(results) == 0
+        count = run(count_search_quotes("s2", "Shared"))
+        assert count == 0
 
 
-class TestGetQuotesByAuthor:
-    def test_by_user_id(self):
-        run(add_quote("s1", "Q1", "u1", author_user_id="a1"))
-        run(add_quote("s1", "Q2", "u1", author_user_id="a2"))
-        results = run(get_quotes_by_author("s1", author_user_id="a1"))
-        assert len(results) == 1
+class TestPaginatedAuthor:
+    def test_count_and_page(self):
+        for i in range(7):
+            run(add_quote("s1", "Q%d" % i, "u1", author_user_id="a1"))
+        run(add_quote("s1", "Other", "u1", author_user_id="a2"))
+
+        count = run(count_quotes_by_author("s1", author_user_id="a1"))
+        assert count == 7
+
+        page0 = run(get_quotes_by_author_page("s1", 0, author_user_id="a1"))
+        assert len(page0) == 5
+
+        page1 = run(get_quotes_by_author_page("s1", 1, author_user_id="a1"))
+        assert len(page1) == 2
 
     def test_by_name(self):
         run(add_quote("s1", "Q1", "u1", author_name="Bob"))
         run(add_quote("s1", "Q2", "u1", author_name="Alice"))
-        results = run(get_quotes_by_author("s1", author_name="Bob"))
-        assert len(results) == 1
+        count = run(count_quotes_by_author("s1", author_name="Bob"))
+        assert count == 1
