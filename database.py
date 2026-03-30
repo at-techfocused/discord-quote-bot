@@ -27,7 +27,6 @@ async def init_db():
             )
         """)
         
-        # Automatic Migrations for new columns
         async with db.execute("PRAGMA table_info(quotes)") as cursor:
             columns = [row[1] for row in await cursor.fetchall()]
             if "image_url" not in columns:
@@ -35,7 +34,6 @@ async def init_db():
             if "original_message_id" not in columns:
                 await db.execute("ALTER TABLE quotes ADD COLUMN original_message_id TEXT")
                 
-        # Optimization: Create indices for faster lookups
         await db.execute("CREATE INDEX IF NOT EXISTS idx_server_quote ON quotes(server_id, quote_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_server_author_name ON quotes(server_id, author_name)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_server_message ON quotes(server_id, original_message_id)")
@@ -43,7 +41,7 @@ async def init_db():
         await db.commit()
 
 async def close_db():
-    pass # Reserved for future connection pooling cleanup
+    pass 
 
 async def get_next_quote_id(server_id: str) -> int:
     async with aiosqlite.connect(DB_FILE) as db:
@@ -107,7 +105,6 @@ async def get_quote(server_id: str, quote_id: int) -> dict:
             return await cursor.fetchone()
 
 async def check_quote_by_message_id(server_id: str, message_id: str) -> bool:
-    """Checks if a Discord message has already been saved as a quote to prevent duplicates."""
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute(
             "SELECT 1 FROM quotes WHERE server_id = ? AND original_message_id = ?", 
@@ -193,3 +190,74 @@ async def get_unique_author_names(server_id: str, current: str) -> list[str]:
         ) as cursor:
             rows = await cursor.fetchall()
             return [row[0] for row in rows]
+
+# ---- NEW STATS FUNCTIONS ----
+
+async def get_global_stats(server_id: str) -> dict:
+    async with aiosqlite.connect(DB_FILE) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT COUNT(*) as total FROM quotes WHERE server_id = ?", (server_id,)) as cursor:
+            total = (await cursor.fetchone())['total']
+        async with db.execute("SELECT COUNT(DISTINCT added_by_user_id) as submitters FROM quotes WHERE server_id = ?", (server_id,)) as cursor:
+            submitters = (await cursor.fetchone())['submitters']
+        async with db.execute("SELECT COUNT(DISTINCT COALESCE(author_user_id, author_name)) as authors FROM quotes WHERE server_id = ?", (server_id,)) as cursor:
+            authors = (await cursor.fetchone())['authors']
+        return {"total_quotes": total, "unique_submitters": submitters, "unique_authors": authors}
+
+async def get_top_authors(server_id: str, limit: int = 5) -> list:
+    async with aiosqlite.connect(DB_FILE) as db:
+        db.row_factory = dict_factory
+        query = """
+            SELECT author_user_id, author_name, COUNT(*) as count 
+            FROM quotes 
+            WHERE server_id = ? AND (author_user_id IS NOT NULL OR author_name IS NOT NULL)
+            GROUP BY COALESCE(author_user_id, author_name)
+            ORDER BY count DESC 
+            LIMIT ?
+        """
+        async with db.execute(query, (server_id, limit)) as cursor:
+            return await cursor.fetchall()
+
+async def get_top_submitters(server_id: str, limit: int = 5) -> list:
+    async with aiosqlite.connect(DB_FILE) as db:
+        db.row_factory = dict_factory
+        query = """
+            SELECT added_by_user_id, COUNT(*) as count 
+            FROM quotes 
+            WHERE server_id = ? 
+            GROUP BY added_by_user_id 
+            ORDER BY count DESC 
+            LIMIT ?
+        """
+        async with db.execute(query, (server_id, limit)) as cursor:
+            return await cursor.fetchall()
+
+async def get_user_stats(server_id: str, user_id: str) -> dict:
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT COUNT(*) FROM quotes WHERE server_id = ? AND author_user_id = ?", (server_id, user_id)) as cursor:
+            quoted_count = (await cursor.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM quotes WHERE server_id = ? AND added_by_user_id = ?", (server_id, user_id)) as cursor:
+            submitted_count = (await cursor.fetchone())[0]
+
+        author_rank_query = """
+            SELECT COUNT(*) + 1 FROM (
+                SELECT COUNT(*) as c FROM quotes WHERE server_id = ? AND author_user_id IS NOT NULL GROUP BY author_user_id
+            ) WHERE c > ?
+        """
+        async with db.execute(author_rank_query, (server_id, quoted_count)) as cursor:
+            author_rank = (await cursor.fetchone())[0] if quoted_count > 0 else 0
+
+        submitter_rank_query = """
+            SELECT COUNT(*) + 1 FROM (
+                SELECT COUNT(*) as c FROM quotes WHERE server_id = ? GROUP BY added_by_user_id
+            ) WHERE c > ?
+        """
+        async with db.execute(submitter_rank_query, (server_id, submitted_count)) as cursor:
+            submitter_rank = (await cursor.fetchone())[0] if submitted_count > 0 else 0
+
+        return {
+            "quoted_count": quoted_count,
+            "submitted_count": submitted_count,
+            "author_rank": author_rank,
+            "submitter_rank": submitter_rank
+        }

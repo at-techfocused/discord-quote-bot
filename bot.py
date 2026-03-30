@@ -12,7 +12,8 @@ from database import (
     init_db, close_db, add_quote, remove_quote, edit_quote, get_quote,
     get_random_quote, count_quotes_by_author, get_quotes_by_author_page,
     count_search_quotes, search_quotes_page, get_unique_author_names, 
-    check_quote_by_message_id, QUOTES_PER_PAGE,
+    check_quote_by_message_id, get_global_stats, get_top_authors, 
+    get_top_submitters, get_user_stats, QUOTES_PER_PAGE,
 )
 from paginator import PaginatorView, build_page_embed
 
@@ -180,7 +181,6 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     except (discord.NotFound, discord.Forbidden):
         return
 
-    # Filter unauthorized manual reactions on the Bot's own messages
     if message.author.id == bot.user.id:
         if str(payload.emoji) not in APPROVED_EMOJIS:
             try:
@@ -523,6 +523,64 @@ async def qsearch(interaction: discord.Interaction, keyword: str):
     )
     await interaction.response.send_message(embed=embed, view=view)
 
+# ---- NEW: /qstats COMMAND ----
+
+@bot.tree.command(name="qstats", description="View server quote statistics and leaderboards")
+@app_commands.describe(user="Optional: View personal stats for a specific user")
+@app_commands.guild_only()
+async def qstats(interaction: discord.Interaction, user: discord.User | None = None):
+    server_id = str(interaction.guild_id)
+    
+    if user:
+        stats = await get_user_stats(server_id, str(user.id))
+        embed = discord.Embed(title=f"📊 Stats for {user.display_name}", color=discord.Color.blue())
+        
+        if user.avatar:
+            embed.set_thumbnail(url=user.avatar.url)
+            
+        auth_rank_str = f"#{stats['author_rank']}" if stats['author_rank'] > 0 else "N/A"
+        sub_rank_str = f"#{stats['submitter_rank']}" if stats['submitter_rank'] > 0 else "N/A"
+        
+        embed.add_field(name="🗣️ Times Quoted", value=f"**{stats['quoted_count']}**\nServer Rank: {auth_rank_str}", inline=True)
+        embed.add_field(name="📝 Quotes Saved", value=f"**{stats['submitted_count']}**\nServer Rank: {sub_rank_str}", inline=True)
+        
+        await interaction.response.send_message(embed=embed)
+        
+    else:
+        global_stats = await get_global_stats(server_id)
+        top_authors = await get_top_authors(server_id, 5)
+        top_submitters = await get_top_submitters(server_id, 5)
+        
+        embed = discord.Embed(title="🏆 Server Quote Leaderboard", color=discord.Color.gold())
+        if interaction.guild.icon:
+            embed.set_thumbnail(url=interaction.guild.icon.url)
+            
+        embed.add_field(
+            name="📊 Big Picture", 
+            value=f"**Total Quotes:** {global_stats['total_quotes']}\n**Unique Speakers:** {global_stats['unique_authors']}\n**Quote Hunters:** {global_stats['unique_submitters']}", 
+            inline=False
+        )
+        
+        medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
+        authors_text = ""
+        for i, row in enumerate(top_authors):
+            name = f"<@{row['author_user_id']}>" if row['author_user_id'] else row['author_name']
+            authors_text += f"{medals[i]} {name} — **{row['count']}**\n"
+        
+        if not authors_text:
+            authors_text = "No quotes saved yet."
+        embed.add_field(name="🗣️ Most Quoted (Hall of Fame)", value=authors_text, inline=True)
+        
+        submitters_text = ""
+        for i, row in enumerate(top_submitters):
+            submitters_text += f"{medals[i]} <@{row['added_by_user_id']}> — **{row['count']}**\n"
+            
+        if not submitters_text:
+            submitters_text = "No one has saved a quote."
+        embed.add_field(name="🕵️ Top Quote Hunters", value=submitters_text, inline=True)
+        
+        await interaction.response.send_message(embed=embed)
+
 
 @bot.tree.command(name="qhelp", description="Show help for the quote bot")
 async def qhelp(interaction: discord.Interaction):
@@ -541,6 +599,7 @@ async def qhelp(interaction: discord.Interaction):
         ("/qget", "`id`\nGet a specific quote by its ID."),
         ("/quser", "`[author_user]` `[author_text]`\nGet all quotes by an author. Features text autocomplete."),
         ("/qsearch", "`keyword`\nSearch quotes by keyword (paginated)."),
+        ("/qstats", "`[user]`\nView the global server leaderboard or a specific user's stats."),
     ]
     for name, value in commands_info:
         embed.add_field(name=name, value=value, inline=False)
