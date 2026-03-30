@@ -49,9 +49,9 @@ def format_single_quote_embed(quote: dict, guild: discord.Guild | None = None) -
         except ValueError:
             continue
 
-    # 3. Create the embed with the Hanging Citation and native timestamp
+    # 3. Create the embed with the Hanging Citation (Mobile Fix applied here)
     embed = discord.Embed(
-        description="> %s\n> \n> ***\u2014 %s***" % (quote["quote_text"], author_mention),
+        description="> %s\n> \n> ***\u2014*** %s" % (quote["quote_text"], author_mention),
         color=get_embed_color(guild, quote),
         timestamp=parsed_dt
     )
@@ -134,9 +134,9 @@ async def qadd(
         author_user.mention if author_user else author_text or "Unknown"
     )
     
-    # Updated to match the Hanging Citation formatting
+    # Updated to match the Hanging Citation formatting (Mobile Fix applied here)
     embed = discord.Embed(
-        description="> %s\n> \n> ***\u2014 %s***" % (text, author_display),
+        description="> %s\n> \n> ***\u2014*** %s" % (text, author_display),
         color=discord.Color.green(),
         timestamp=datetime.now(timezone.utc)
     )

@@ -8,8 +8,8 @@ def format_quote(quote: dict) -> str:
         if quote["author_user_id"]
         else quote["author_name"] or "Unknown"
     )
-    # Uses the "Hanging Citation" format to match bot.py
-    return "**Quote #%d**\n> %s\n> \n> ***\u2014 %s***" % (quote["quote_id"], quote["quote_text"], author)
+    # Uses the "Hanging Citation" format (Mobile Fix applied here)
+    return "**Quote #%d**\n> %s\n> \n> ***\u2014*** %s" % (quote["quote_id"], quote["quote_text"], author)
 
 def build_page_embed(
     quotes: list[dict], page: int, title: str = "Quotes"
