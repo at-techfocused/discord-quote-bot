@@ -40,7 +40,6 @@ def get_embed_color(guild: discord.Guild | None, quote: dict) -> discord.Color:
             return member.top_role.color
     return discord.Color.from_rgb(random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
 
-
 def format_single_quote_embed(quote: dict, guild: discord.Guild | None = None) -> discord.Embed:
     author_mention = (
         f"<@{quote['author_user_id']}>"
@@ -84,7 +83,6 @@ def format_single_quote_embed(quote: dict, guild: discord.Guild | None = None) -
         user = guild.get_member(user_id) if guild else None
         if not user:
             user = bot.get_user(user_id)
-            
         added_by_text = user.display_name if user else f"User {added_by_raw}"
     else:
         added_by_text = added_by_raw or "Unknown"
@@ -93,12 +91,21 @@ def format_single_quote_embed(quote: dict, guild: discord.Guild | None = None) -
     return embed
 
 
+def get_quote_url_view(quote: dict) -> discord.ui.View | None:
+    """Builds a UI View with a 'Jump to Message' button if context data exists."""
+    if quote.get("original_message_id") and quote.get("channel_id"):
+        url = f"https://discord.com/channels/{quote['server_id']}/{quote['channel_id']}/{quote['original_message_id']}"
+        view = discord.ui.View()
+        view.add_item(discord.ui.Button(label="Jump to Message", url=url, style=discord.ButtonStyle.link))
+        return view
+    return None
+
+
 def has_manage_permission(interaction: discord.Interaction, quote: dict) -> bool:
     if str(interaction.user.id) == str(quote["added_by_user_id"]):
         return True
     perms = interaction.user.guild_permissions
     return perms.administrator or perms.manage_messages
-
 
 class ConfirmRemoveView(discord.ui.View):
     def __init__(self, author_id: int, quote: dict, guild: discord.Guild):
@@ -106,14 +113,18 @@ class ConfirmRemoveView(discord.ui.View):
         self.author_id = author_id
         self.quote = quote
         self.guild = guild
+        
+        # Keep the URL button even on the delete confirmation screen
+        if quote.get("original_message_id") and quote.get("channel_id"):
+            url = f"https://discord.com/channels/{quote['server_id']}/{quote['channel_id']}/{quote['original_message_id']}"
+            self.add_item(discord.ui.Button(label="Jump to Message (Review Context)", url=url, row=1))
 
-    @discord.ui.button(label="Confirm Delete", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Confirm Delete", style=discord.ButtonStyle.danger, row=0)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.author_id:
             return await interaction.response.send_message("Only the command user can confirm this.", ephemeral=True)
             
         await remove_quote(str(interaction.guild_id), self.quote["quote_id"])
-        
         for child in self.children:
             child.disabled = True
             
@@ -123,7 +134,7 @@ class ConfirmRemoveView(discord.ui.View):
         
         await interaction.response.edit_message(content=None, embed=embed, view=self)
 
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=0)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.author_id:
             return await interaction.response.send_message("Only the command user can cancel this.", ephemeral=True)
@@ -131,7 +142,6 @@ class ConfirmRemoveView(discord.ui.View):
         for child in self.children:
             child.disabled = True
         await interaction.response.edit_message(content="❌ Deletion cancelled.", embed=None, view=self)
-
 
 async def author_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
     names = await get_unique_author_names(str(interaction.guild_id), current)
@@ -222,7 +232,8 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         author_user_id=str(message.author.id),
         author_name=None,
         image_url=image_url,
-        original_message_id=message_id
+        original_message_id=message_id,
+        channel_id=str(payload.channel_id)
     )
 
     embed = discord.Embed(
@@ -272,7 +283,8 @@ async def save_quote_context(interaction: discord.Interaction, message: discord.
         author_user_id=str(message.author.id),
         author_name=None,
         image_url=image_url,
-        original_message_id=message_id
+        original_message_id=message_id,
+        channel_id=str(message.channel.id)
     )
 
     embed = discord.Embed(
@@ -409,7 +421,12 @@ async def qedit(
     embed = format_single_quote_embed(updated, interaction.guild)
     embed.set_author(name=f"Quote #{id} Updated")
     embed.color = discord.Color.orange()
-    await interaction.response.send_message(embed=embed)
+    
+    view = get_quote_url_view(updated)
+    if view:
+        await interaction.response.send_message(embed=embed, view=view)
+    else:
+        await interaction.response.send_message(embed=embed)
 
 
 @bot.tree.command(name="qrandom", description="Get a random quote")
@@ -435,7 +452,13 @@ async def qrandom(
     if not quote:
         return await interaction.response.send_message("No quotes found.", ephemeral=True)
 
-    await interaction.response.send_message(embed=format_single_quote_embed(quote, interaction.guild))
+    embed = format_single_quote_embed(quote, interaction.guild)
+    view = get_quote_url_view(quote)
+    
+    if view:
+        await interaction.response.send_message(embed=embed, view=view)
+    else:
+        await interaction.response.send_message(embed=embed)
 
 
 @bot.tree.command(name="qget", description="Get a specific quote by ID")
@@ -446,7 +469,13 @@ async def qget(interaction: discord.Interaction, id: int):
     if not quote:
         return await interaction.response.send_message(f"Quote #{id} not found.", ephemeral=True)
 
-    await interaction.response.send_message(embed=format_single_quote_embed(quote, interaction.guild))
+    embed = format_single_quote_embed(quote, interaction.guild)
+    view = get_quote_url_view(quote)
+    
+    if view:
+        await interaction.response.send_message(embed=embed, view=view)
+    else:
+        await interaction.response.send_message(embed=embed)
 
 
 @bot.tree.command(name="quser", description="Get all quotes by an author")
@@ -490,7 +519,8 @@ async def quser(
         title=title,
         author_id=interaction.user.id,
         format_single_embed=lambda q: format_single_quote_embed(q, interaction.guild),
-        first_page_quotes=first_page
+        first_page_quotes=first_page,
+        format_single_view=get_quote_url_view
     )
     await interaction.response.send_message(embed=embed, view=view)
 
@@ -519,11 +549,11 @@ async def qsearch(interaction: discord.Interaction, keyword: str):
         title=title,
         author_id=interaction.user.id,
         format_single_embed=lambda q: format_single_quote_embed(q, interaction.guild),
-        first_page_quotes=first_page
+        first_page_quotes=first_page,
+        format_single_view=get_quote_url_view
     )
     await interaction.response.send_message(embed=embed, view=view)
 
-# ---- NEW: /qstats COMMAND ----
 
 @bot.tree.command(name="qstats", description="View server quote statistics and leaderboards")
 @app_commands.describe(user="Optional: View personal stats for a specific user")
