@@ -11,9 +11,9 @@ from dotenv import load_dotenv
 from database import (
     init_db, close_db, add_quote, remove_quote, edit_quote, get_quote,
     get_random_quote, count_quotes_by_author, get_quotes_by_author_page,
-    count_search_quotes, search_quotes_page, get_unique_author_names, 
-    check_quote_by_message_id, get_global_stats, get_top_authors, 
-    get_top_submitters, get_user_stats, QUOTES_PER_PAGE,
+    count_search_quotes, search_quotes_page, get_unique_author_names,
+    check_quote_by_message_id, count_server_quotes, get_global_stats,
+    get_top_authors, get_top_submitters, get_user_stats, QUOTES_PER_PAGE,
 )
 from paginator import PaginatorView, build_page_embed
 
@@ -23,7 +23,7 @@ logger = logging.getLogger("quote_bot")
 
 QUOTE_MAX_LENGTH = 1000
 REACTION_EMOJI = "🗣️"
-APPROVED_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "◀️", "❌", "▶️", REACTION_EMOJI]
+APPROVED_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "◀️", "❌", "▶️", "✅", REACTION_EMOJI]
 
 intents = discord.Intents.default()
 intents.members = True
@@ -33,12 +33,31 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ---- Helpers & UI Views ----
 
+# Pleasant fallback palette when no role color is available
+_FALLBACK_COLORS = [
+    0x5865F2,  # Blurple
+    0xEB459E,  # Fuchsia
+    0x57F287,  # Green
+    0xFEE75C,  # Yellow
+    0xED4245,  # Red
+    0x3498DB,  # Blue
+    0xE67E22,  # Orange
+    0x9B59B6,  # Purple
+    0x1ABC9C,  # Teal
+    0xE91E63,  # Pink
+    0x2ECC71,  # Emerald
+    0xF39C12,  # Amber
+]
+
+
 def get_embed_color(guild: discord.Guild | None, quote: dict) -> discord.Color:
     if guild and quote.get("author_user_id"):
         member = guild.get_member(int(quote["author_user_id"]))
         if member and member.top_role.color.value != 0:
             return member.top_role.color
-    return discord.Color.from_rgb(random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+    # Seed by author identity so the same author always gets the same fallback color
+    seed = quote.get("author_user_id") or quote.get("author_name") or ""
+    return discord.Color(_FALLBACK_COLORS[hash(seed) % len(_FALLBACK_COLORS)])
 
 
 def format_single_quote_embed(quote: dict, guild: discord.Guild | None = None) -> discord.Embed:
@@ -231,7 +250,11 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     
     is_duplicate = await check_quote_by_message_id(server_id, message_id)
     if is_duplicate:
-        return 
+        try:
+            await message.add_reaction("✅")
+        except discord.Forbidden:
+            pass
+        return
 
     if message.author.bot:
         return
@@ -258,6 +281,11 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         original_message_id=message_id
     )
 
+    try:
+        await message.add_reaction("✅")
+    except discord.Forbidden:
+        pass
+
     embed = discord.Embed(
         description=f"> {text or '[Image Only]'}\n> \n> ***\u2014*** {message.author.mention}",
         color=discord.Color.green(),
@@ -267,8 +295,9 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     embed.set_thumbnail(url=message.author.display_avatar.url)
     if image_url:
         embed.set_image(url=image_url)
-    embed.set_footer(text=f"Added by {added_by_name}")
-    
+    total = await count_server_quotes(server_id)
+    embed.set_footer(text=f"Added by {added_by_name} · {total} quotes in server")
+
     try:
         await channel.send(embed=embed, reference=message)
     except discord.Forbidden:
@@ -317,7 +346,8 @@ async def save_quote_context(interaction: discord.Interaction, message: discord.
     embed.set_thumbnail(url=message.author.display_avatar.url)
     if image_url:
         embed.set_image(url=image_url)
-    embed.set_footer(text=f"Added by {interaction.user.display_name}")
+    total = await count_server_quotes(server_id)
+    embed.set_footer(text=f"Added by {interaction.user.display_name} · {total} quotes in server")
     
     await interaction.response.send_message(embed=embed)
 
@@ -341,6 +371,10 @@ async def qadd(
     if author_user and author_text:
         return await interaction.response.send_message("Please provide either `author_user` or `author_text`, not both.", ephemeral=True)
 
+    text = text.strip()
+    if not text:
+        return await interaction.response.send_message("Quote text cannot be empty or whitespace.", ephemeral=True)
+
     if len(text) > QUOTE_MAX_LENGTH:
         return await interaction.response.send_message(f"Quote text must be {QUOTE_MAX_LENGTH} characters or fewer.", ephemeral=True)
 
@@ -363,13 +397,14 @@ async def qadd(
         timestamp=datetime.now(timezone.utc),
     )
     embed.set_author(name=f"Quote #{quote_id} Added")
-    
+
     if image_url:
         embed.set_image(url=image_url)
     if author_user:
         embed.set_thumbnail(url=author_user.display_avatar.url)
-        
-    embed.set_footer(text=f"Added by {interaction.user.display_name}")
+
+    total = await count_server_quotes(str(interaction.guild_id))
+    embed.set_footer(text=f"Added by {interaction.user.display_name} · {total} quotes in server")
     await interaction.response.send_message(embed=embed)
 
 
@@ -415,6 +450,11 @@ async def qedit(
 ):
     if author_user and author_text:
         return await interaction.response.send_message("Please provide either `author_user` or `author_text`, not both.", ephemeral=True)
+
+    if text is not None:
+        text = text.strip()
+        if not text:
+            return await interaction.response.send_message("Quote text cannot be empty or whitespace.", ephemeral=True)
 
     if text is not None and len(text) > QUOTE_MAX_LENGTH:
         return await interaction.response.send_message(f"Quote text must be {QUOTE_MAX_LENGTH} characters or fewer.", ephemeral=True)

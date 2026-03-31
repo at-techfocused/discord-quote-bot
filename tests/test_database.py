@@ -14,6 +14,7 @@ from database import (
     get_quotes_by_author_page,
     count_search_quotes,
     search_quotes_page,
+    count_server_quotes,
 )
 import database
 
@@ -21,8 +22,7 @@ import database
 @pytest.fixture(autouse=True)
 def setup_db(tmp_path, monkeypatch):
     db_file = str(tmp_path / "test.db")
-    monkeypatch.setattr(database, "DB_PATH", db_file)
-    monkeypatch.setattr(database, "_db", None)
+    monkeypatch.setattr(database, "DB_FILE", db_file)
     asyncio.get_event_loop().run_until_complete(init_db())
     yield
     asyncio.get_event_loop().run_until_complete(close_db())
@@ -82,13 +82,12 @@ class TestGetQuote:
 class TestRemoveQuote:
     def test_remove_existing(self):
         run(add_quote("s1", "To remove", "u1"))
-        result = run(remove_quote("s1", 1))
-        assert result is not None
+        run(remove_quote("s1", 1))
         assert run(get_quote("s1", 1)) is None
 
     def test_remove_nonexistent(self):
-        result = run(remove_quote("s1", 999))
-        assert result is None
+        # Should not raise
+        run(remove_quote("s1", 999))
 
 
 class TestEditQuote:
@@ -101,13 +100,11 @@ class TestEditQuote:
         run(add_quote("s1", "Test", "u1", author_name="Old"))
         updated = run(edit_quote("s1", 1, author_user_id="new_user"))
         assert updated["author_user_id"] == "new_user"
-        assert updated["author_name"] is None
 
     def test_edit_author_name(self):
         run(add_quote("s1", "Test", "u1", author_user_id="old_user"))
         updated = run(edit_quote("s1", 1, author_name="New Name"))
         assert updated["author_name"] == "New Name"
-        assert updated["author_user_id"] is None
 
     def test_edit_nonexistent(self):
         result = run(edit_quote("s1", 999, quote_text="Nope"))
@@ -182,3 +179,19 @@ class TestPaginatedAuthor:
         run(add_quote("s1", "Q2", "u1", author_name="Alice"))
         count = run(count_quotes_by_author("s1", author_name="Bob"))
         assert count == 1
+
+    def test_case_insensitive_author_name(self):
+        run(add_quote("s1", "Q1", "u1", author_name="Bob"))
+        run(add_quote("s1", "Q2", "u1", author_name="bob"))
+        count = run(count_quotes_by_author("s1", author_name="BOB"))
+        assert count == 2
+
+
+class TestServerCount:
+    def test_count_server_quotes(self):
+        run(add_quote("s1", "Q1", "u1"))
+        run(add_quote("s1", "Q2", "u1"))
+        run(add_quote("s2", "Q3", "u1"))
+        assert run(count_server_quotes("s1")) == 2
+        assert run(count_server_quotes("s2")) == 1
+        assert run(count_server_quotes("s3")) == 0

@@ -37,7 +37,7 @@ async def init_db():
                 await db.execute("ALTER TABLE quotes ADD COLUMN channel_id TEXT")
                 
         await db.execute("CREATE INDEX IF NOT EXISTS idx_server_quote ON quotes(server_id, quote_id)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_server_author_name ON quotes(server_id, author_name)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_server_author_name ON quotes(server_id, author_name COLLATE NOCASE)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_server_message ON quotes(server_id, original_message_id)")
         
         await db.commit()
@@ -125,7 +125,7 @@ async def get_random_quote(server_id: str, author_user_id: str = None, author_na
         query += " AND author_user_id = ?"
         params.append(author_user_id)
     elif author_name:
-        query += " AND author_name LIKE ?"
+        query += " AND author_name LIKE ? COLLATE NOCASE"
         params.append(f"%{author_name}%")
         
     query += " ORDER BY RANDOM() LIMIT 1"
@@ -142,7 +142,7 @@ async def count_quotes_by_author(server_id: str, author_user_id: str = None, aut
         query += " AND author_user_id = ?"
         params.append(author_user_id)
     elif author_name:
-        query += " AND author_name LIKE ?"
+        query += " AND author_name LIKE ? COLLATE NOCASE"
         params.append(f"%{author_name}%")
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute(query, params) as cursor:
@@ -155,7 +155,7 @@ async def get_quotes_by_author_page(server_id: str, page: int, author_user_id: s
         query += " AND author_user_id = ?"
         params.append(author_user_id)
     elif author_name:
-        query += " AND author_name LIKE ?"
+        query += " AND author_name LIKE ? COLLATE NOCASE"
         params.append(f"%{author_name}%")
     query += f" ORDER BY quote_id DESC LIMIT {QUOTES_PER_PAGE} OFFSET {page * QUOTES_PER_PAGE}"
     async with aiosqlite.connect(DB_FILE) as db:
@@ -180,10 +180,19 @@ async def search_quotes_page(server_id: str, keyword: str, page: int) -> list:
         ) as cursor:
             return await cursor.fetchall()
 
+async def count_server_quotes(server_id: str) -> int:
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM quotes WHERE server_id = ?", (server_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row[0]
+
+
 async def get_unique_author_names(server_id: str, current: str) -> list[str]:
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute(
-            "SELECT DISTINCT author_name FROM quotes WHERE server_id = ? AND author_name LIKE ? AND author_name IS NOT NULL LIMIT 25",
+            "SELECT DISTINCT author_name FROM quotes WHERE server_id = ? AND author_name LIKE ? COLLATE NOCASE AND author_name IS NOT NULL LIMIT 25",
             (server_id, f"%{current}%")
         ) as cursor:
             rows = await cursor.fetchall()
