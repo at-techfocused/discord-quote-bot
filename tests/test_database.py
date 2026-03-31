@@ -15,6 +15,8 @@ from database import (
     count_search_quotes,
     search_quotes_page,
     count_server_quotes,
+    log_audit,
+    get_audit_log,
 )
 import database
 
@@ -185,6 +187,39 @@ class TestPaginatedAuthor:
         run(add_quote("s1", "Q2", "u1", author_name="bob"))
         count = run(count_quotes_by_author("s1", author_name="BOB"))
         assert count == 2
+
+
+class TestAuditLog:
+    def test_log_and_retrieve(self):
+        run(add_quote("s1", "Q1", "u1"))
+        run(log_audit("s1", 1, "edit", "u2", old_value="Q1", new_value="Q1 edited"))
+        entries = run(get_audit_log("s1", quote_id=1))
+        assert len(entries) == 1
+        assert entries[0]["action"] == "edit"
+        assert entries[0]["user_id"] == "u2"
+        assert entries[0]["old_value"] == "Q1"
+        assert entries[0]["new_value"] == "Q1 edited"
+
+    def test_log_delete(self):
+        run(add_quote("s1", "Q1", "u1"))
+        run(log_audit("s1", 1, "delete", "u3", old_value="Q1"))
+        entries = run(get_audit_log("s1", quote_id=1))
+        assert len(entries) == 1
+        assert entries[0]["action"] == "delete"
+        assert entries[0]["new_value"] is None
+
+    def test_log_server_isolation(self):
+        run(log_audit("s1", 1, "edit", "u1"))
+        run(log_audit("s2", 1, "edit", "u1"))
+        assert len(run(get_audit_log("s1"))) == 1
+        assert len(run(get_audit_log("s2"))) == 1
+
+    def test_log_recent_first(self):
+        run(log_audit("s1", 1, "edit", "u1", old_value="v1", new_value="v2"))
+        run(log_audit("s1", 1, "edit", "u1", old_value="v2", new_value="v3"))
+        entries = run(get_audit_log("s1"))
+        assert entries[0]["new_value"] == "v3"
+        assert entries[1]["new_value"] == "v2"
 
 
 class TestServerCount:

@@ -13,7 +13,8 @@ from database import (
     get_random_quote, count_quotes_by_author, get_quotes_by_author_page,
     count_search_quotes, search_quotes_page, get_unique_author_names,
     check_quote_by_message_id, count_server_quotes, get_global_stats,
-    get_top_authors, get_top_submitters, get_user_stats, QUOTES_PER_PAGE,
+    get_top_authors, get_top_submitters, get_user_stats,
+    log_audit, get_audit_log, QUOTES_PER_PAGE,
 )
 from paginator import PaginatorView, build_page_embed
 
@@ -69,15 +70,15 @@ def format_single_quote_embed(quote: dict, guild: discord.Guild | None = None) -
 
     ts_plain = quote["timestamp"]
     parsed_dt = None
-    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
+    try:
+        dt = datetime.fromisoformat(ts_plain)
+        parsed_dt = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except ValueError:
         try:
-            dt = datetime.strptime(ts_plain, fmt)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            parsed_dt = dt
-            break
+            dt = datetime.strptime(ts_plain, "%Y-%m-%d %H:%M:%S")
+            parsed_dt = dt.replace(tzinfo=timezone.utc)
         except ValueError:
-            continue
+            pass
 
     embed = discord.Embed(
         description=f"> {quote['quote_text']}\n> \n> ***\u2014*** {author_mention}",
@@ -131,8 +132,14 @@ class ConfirmRemoveView(discord.ui.View):
         if interaction.user.id != self.author_id:
             return await interaction.response.send_message("Only the command user can confirm this.", ephemeral=True)
             
-        await remove_quote(str(interaction.guild_id), self.quote["quote_id"])
-        
+        server_id = str(interaction.guild_id)
+        await log_audit(
+            server_id, self.quote["quote_id"], "delete",
+            str(interaction.user.id),
+            old_value=self.quote["quote_text"],
+        )
+        await remove_quote(server_id, self.quote["quote_id"])
+
         for child in self.children:
             child.disabled = True
             
@@ -208,6 +215,14 @@ async def on_close():
 
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.CommandOnCooldown):
+        msg = f"Slow down! Try again in {error.retry_after:.0f}s."
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+        return
+
     logger.error("Command /%s failed: %s", interaction.command.name if interaction.command else "unknown", error)
     traceback.print_exception(type(error), error, error.__traceback__)
     message = "Something went wrong. Try again in a moment."
@@ -359,6 +374,7 @@ async def save_quote_context(interaction: discord.Interaction, message: discord.
     author_text="The name of the author (for non-Discord users)",
     attachment="An optional image to attach to the quote"
 )
+@app_commands.checks.cooldown(1, 5.0)
 @app_commands.autocomplete(author_text=author_autocomplete)
 @app_commands.guild_only()
 async def qadd(
@@ -410,6 +426,7 @@ async def qadd(
 
 @bot.tree.command(name="qremove", description="Remove a quote by ID")
 @app_commands.describe(id="The quote ID to remove")
+@app_commands.checks.cooldown(1, 5.0)
 @app_commands.guild_only()
 async def qremove(interaction: discord.Interaction, id: int):
     quote = await get_quote(str(interaction.guild_id), id)
@@ -438,6 +455,7 @@ async def qremove(interaction: discord.Interaction, id: int):
     author_text="New text author name",
     attachment="New image attachment (overwrites existing)"
 )
+@app_commands.checks.cooldown(1, 5.0)
 @app_commands.autocomplete(author_text=author_autocomplete)
 @app_commands.guild_only()
 async def qedit(
@@ -471,13 +489,20 @@ async def qedit(
 
     image_url = attachment.url if attachment else None
 
+    server_id = str(interaction.guild_id)
     updated = await edit_quote(
-        server_id=str(interaction.guild_id),
+        server_id=server_id,
         quote_id=id,
         quote_text=text,
         author_user_id=str(author_user.id) if author_user else None,
         author_name=author_text,
         image_url=image_url
+    )
+    await log_audit(
+        server_id, id, "edit",
+        str(interaction.user.id),
+        old_value=quote["quote_text"],
+        new_value=updated["quote_text"],
     )
     embed = format_single_quote_embed(updated, interaction.guild)
     embed.set_author(name=f"Quote #{id} Updated")
@@ -654,6 +679,50 @@ async def qstats(interaction: discord.Interaction, user: discord.User | None = N
         await interaction.response.send_message(embed=embed)
 
 
+@bot.tree.command(name="qlog", description="[ADMIN] View the audit log of quote edits and deletions")
+@app_commands.describe(id="Optional: Filter by quote ID")
+@app_commands.default_permissions(manage_messages=True)
+@app_commands.guild_only()
+async def qlog(interaction: discord.Interaction, id: int | None = None):
+    server_id = str(interaction.guild_id)
+    entries = await get_audit_log(server_id, quote_id=id)
+
+    if not entries:
+        return await interaction.response.send_message("No audit log entries found.", ephemeral=True)
+
+    lines = []
+    for entry in entries:
+        try:
+            dt = datetime.fromisoformat(entry["timestamp"])
+            ts = f"<t:{int(dt.timestamp())}:R>"
+        except ValueError:
+            ts = entry["timestamp"]
+
+        action = entry["action"].upper()
+        user = f"<@{entry['user_id']}>"
+        qid = entry["quote_id"]
+
+        if entry["action"] == "delete":
+            detail = f"Text: *{entry['old_value'][:80]}{'...' if len(entry.get('old_value', '') or '') > 80 else ''}*"
+        elif entry["action"] == "edit":
+            old = (entry.get("old_value") or "")[:60]
+            new = (entry.get("new_value") or "")[:60]
+            detail = f"`{old}` → `{new}`"
+        else:
+            detail = ""
+
+        lines.append(f"{ts} **{action}** Quote #{qid} by {user}\n{detail}")
+
+    title = f"Audit Log — Quote #{id}" if id else "Audit Log (Recent)"
+    embed = discord.Embed(
+        title=title,
+        description="\n\n".join(lines),
+        color=discord.Color.dark_grey(),
+    )
+    embed.set_footer(text=f"Showing {len(entries)} entries")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 @bot.tree.command(name="qhelp", description="Show help for the quote bot")
 async def qhelp(interaction: discord.Interaction):
     embed = discord.Embed(
@@ -672,6 +741,7 @@ async def qhelp(interaction: discord.Interaction):
         ("/quser", "`[author_user]` `[author_text]`\nGet all quotes by an author. Features text autocomplete."),
         ("/qsearch", "`keyword`\nSearch quotes by keyword (paginated)."),
         ("/qstats", "`[user]`\nView the global server leaderboard or a specific user's stats."),
+        ("/qlog", "`[id]`\n[Manage Messages] View audit log of quote edits and deletions."),
     ]
     for name, value in commands_info:
         embed.add_field(name=name, value=value, inline=False)

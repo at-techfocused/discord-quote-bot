@@ -36,6 +36,20 @@ async def init_db():
             if "channel_id" not in columns:
                 await db.execute("ALTER TABLE quotes ADD COLUMN channel_id TEXT")
                 
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                server_id TEXT NOT NULL,
+                quote_id INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                old_value TEXT,
+                new_value TEXT,
+                timestamp TEXT NOT NULL
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_audit_server_quote ON audit_log(server_id, quote_id)")
+
         await db.execute("CREATE INDEX IF NOT EXISTS idx_server_quote ON quotes(server_id, quote_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_server_author_name ON quotes(server_id, author_name COLLATE NOCASE)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_server_message ON quotes(server_id, original_message_id)")
@@ -64,7 +78,7 @@ async def add_quote(
     channel_id: str = None
 ) -> int:
     quote_id = await get_next_quote_id(server_id)
-    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
     
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute("""
@@ -222,6 +236,33 @@ async def get_top_submitters(server_id: str, limit: int = 5) -> list:
         query = "SELECT added_by_user_id, COUNT(*) as count FROM quotes WHERE server_id = ? GROUP BY added_by_user_id ORDER BY count DESC LIMIT ?"
         async with db.execute(query, (server_id, limit)) as cursor:
             return await cursor.fetchall()
+
+async def log_audit(server_id: str, quote_id: int, action: str, user_id: str, old_value: str = None, new_value: str = None):
+    timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("""
+            INSERT INTO audit_log (server_id, quote_id, action, user_id, old_value, new_value, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (server_id, quote_id, action, user_id, old_value, new_value, timestamp))
+        await db.commit()
+
+
+async def get_audit_log(server_id: str, quote_id: int = None, limit: int = 15) -> list:
+    async with aiosqlite.connect(DB_FILE) as db:
+        db.row_factory = dict_factory
+        if quote_id:
+            async with db.execute(
+                "SELECT * FROM audit_log WHERE server_id = ? AND quote_id = ? ORDER BY id DESC LIMIT ?",
+                (server_id, quote_id, limit)
+            ) as cursor:
+                return await cursor.fetchall()
+        else:
+            async with db.execute(
+                "SELECT * FROM audit_log WHERE server_id = ? ORDER BY id DESC LIMIT ?",
+                (server_id, limit)
+            ) as cursor:
+                return await cursor.fetchall()
+
 
 async def get_user_stats(server_id: str, user_id: str) -> dict:
     async with aiosqlite.connect(DB_FILE) as db:
