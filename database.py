@@ -2,6 +2,7 @@ import os
 import aiosqlite
 import datetime
 
+# Automatically use Railway's DB_PATH variable if it exists, otherwise default to local quotes.db
 DB_FILE = os.getenv("DB_PATH", "quotes.db")
 QUOTES_PER_PAGE = 5
 
@@ -26,32 +27,25 @@ async def init_db():
             )
         """)
         
-        # Migrations
+        # NEW: Favorites Table
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS favorites (
+                server_id TEXT NOT NULL,
+                quote_id INTEGER NOT NULL,
+                user_id TEXT NOT NULL,
+                PRIMARY KEY (server_id, quote_id, user_id)
+            )
+        """)
+        
         async with db.execute("PRAGMA table_info(quotes)") as cursor:
             columns = [row[1] for row in await cursor.fetchall()]
             if "image_url" not in columns:
                 await db.execute("ALTER TABLE quotes ADD COLUMN image_url TEXT")
             if "original_message_id" not in columns:
                 await db.execute("ALTER TABLE quotes ADD COLUMN original_message_id TEXT")
-            if "channel_id" not in columns:
-                await db.execute("ALTER TABLE quotes ADD COLUMN channel_id TEXT")
                 
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS audit_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                server_id TEXT NOT NULL,
-                quote_id INTEGER NOT NULL,
-                action TEXT NOT NULL,
-                user_id TEXT NOT NULL,
-                old_value TEXT,
-                new_value TEXT,
-                timestamp TEXT NOT NULL
-            )
-        """)
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_audit_server_quote ON audit_log(server_id, quote_id)")
-
         await db.execute("CREATE INDEX IF NOT EXISTS idx_server_quote ON quotes(server_id, quote_id)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_server_author_name ON quotes(server_id, author_name COLLATE NOCASE)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_server_author_name ON quotes(server_id, author_name)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_server_message ON quotes(server_id, original_message_id)")
         
         await db.commit()
@@ -67,35 +61,28 @@ async def get_next_quote_id(server_id: str) -> int:
             row = await cursor.fetchone()
             return (row[0] or 0) + 1
 
-async def add_quote(
-    server_id: str, 
-    quote_text: str, 
-    added_by_user_id: str, 
-    author_user_id: str = None, 
-    author_name: str = None, 
-    image_url: str = None, 
-    original_message_id: str = None,
-    channel_id: str = None
-) -> int:
+async def add_quote(server_id: str, quote_text: str, added_by_user_id: str, author_user_id: str = None, author_name: str = None, image_url: str = None, original_message_id: str = None) -> int:
     quote_id = await get_next_quote_id(server_id)
-    timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute("""
-            INSERT INTO quotes (server_id, quote_id, quote_text, author_user_id, author_name, added_by_user_id, timestamp, image_url, original_message_id, channel_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (server_id, quote_id, quote_text, author_user_id, author_name, added_by_user_id, timestamp, image_url, original_message_id, channel_id))
+            INSERT INTO quotes (server_id, quote_id, quote_text, author_user_id, author_name, added_by_user_id, timestamp, image_url, original_message_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (server_id, quote_id, quote_text, author_user_id, author_name, added_by_user_id, timestamp, image_url, original_message_id))
         await db.commit()
     return quote_id
 
 async def remove_quote(server_id: str, quote_id: int):
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute("DELETE FROM quotes WHERE server_id = ? AND quote_id = ?", (server_id, quote_id))
+        await db.execute("DELETE FROM favorites WHERE server_id = ? AND quote_id = ?", (server_id, quote_id)) # Cascade delete favorites
         await db.commit()
 
 async def edit_quote(server_id: str, quote_id: int, quote_text: str = None, author_user_id: str = None, author_name: str = None, image_url: str = None) -> dict:
     async with aiosqlite.connect(DB_FILE) as db:
         db.row_factory = dict_factory
+        
         async with db.execute("SELECT * FROM quotes WHERE server_id = ? AND quote_id = ?", (server_id, quote_id)) as cursor:
             quote = await cursor.fetchone()
             
@@ -104,8 +91,13 @@ async def edit_quote(server_id: str, quote_id: int, quote_text: str = None, auth
             
         new_text = quote_text if quote_text is not None else quote['quote_text']
         new_image_url = image_url if image_url is not None else quote.get('image_url')
-        new_author_user_id = author_user_id if author_user_id is not None else quote['author_user_id']
-        new_author_name = author_name if author_name is not None else quote['author_name']
+        
+        if author_user_id is not None or author_name is not None:
+            new_author_user_id = author_user_id
+            new_author_name = author_name
+        else:
+            new_author_user_id = quote['author_user_id']
+            new_author_name = quote['author_name']
 
         await db.execute("""
             UPDATE quotes 
@@ -139,7 +131,7 @@ async def get_random_quote(server_id: str, author_user_id: str = None, author_na
         query += " AND author_user_id = ?"
         params.append(author_user_id)
     elif author_name:
-        query += " AND author_name LIKE ? COLLATE NOCASE"
+        query += " AND author_name LIKE ?"
         params.append(f"%{author_name}%")
         
     query += " ORDER BY RANDOM() LIMIT 1"
@@ -152,26 +144,32 @@ async def get_random_quote(server_id: str, author_user_id: str = None, author_na
 async def count_quotes_by_author(server_id: str, author_user_id: str = None, author_name: str = None) -> int:
     query = "SELECT COUNT(*) FROM quotes WHERE server_id = ?"
     params = [server_id]
+    
     if author_user_id:
         query += " AND author_user_id = ?"
         params.append(author_user_id)
     elif author_name:
-        query += " AND author_name LIKE ? COLLATE NOCASE"
+        query += " AND author_name LIKE ?"
         params.append(f"%{author_name}%")
+        
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute(query, params) as cursor:
-            return (await cursor.fetchone())[0]
+            row = await cursor.fetchone()
+            return row[0]
 
 async def get_quotes_by_author_page(server_id: str, page: int, author_user_id: str = None, author_name: str = None) -> list:
     query = "SELECT * FROM quotes WHERE server_id = ?"
     params = [server_id]
+    
     if author_user_id:
         query += " AND author_user_id = ?"
         params.append(author_user_id)
     elif author_name:
-        query += " AND author_name LIKE ? COLLATE NOCASE"
+        query += " AND author_name LIKE ?"
         params.append(f"%{author_name}%")
+        
     query += f" ORDER BY quote_id DESC LIMIT {QUOTES_PER_PAGE} OFFSET {page * QUOTES_PER_PAGE}"
+    
     async with aiosqlite.connect(DB_FILE) as db:
         db.row_factory = dict_factory
         async with db.execute(query, params) as cursor:
@@ -183,7 +181,8 @@ async def count_search_quotes(server_id: str, keyword: str) -> int:
             "SELECT COUNT(*) FROM quotes WHERE server_id = ? AND quote_text LIKE ?",
             (server_id, f"%{keyword}%")
         ) as cursor:
-            return (await cursor.fetchone())[0]
+            row = await cursor.fetchone()
+            return row[0]
 
 async def search_quotes_page(server_id: str, keyword: str, page: int) -> list:
     async with aiosqlite.connect(DB_FILE) as db:
@@ -194,23 +193,16 @@ async def search_quotes_page(server_id: str, keyword: str, page: int) -> list:
         ) as cursor:
             return await cursor.fetchall()
 
-async def count_server_quotes(server_id: str) -> int:
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute(
-            "SELECT COUNT(*) FROM quotes WHERE server_id = ?", (server_id,)
-        ) as cursor:
-            row = await cursor.fetchone()
-            return row[0]
-
-
 async def get_unique_author_names(server_id: str, current: str) -> list[str]:
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute(
-            "SELECT DISTINCT author_name FROM quotes WHERE server_id = ? AND author_name LIKE ? COLLATE NOCASE AND author_name IS NOT NULL LIMIT 25",
+            "SELECT DISTINCT author_name FROM quotes WHERE server_id = ? AND author_name LIKE ? AND author_name IS NOT NULL LIMIT 25",
             (server_id, f"%{current}%")
         ) as cursor:
             rows = await cursor.fetchall()
             return [row[0] for row in rows]
+
+# ---- STATS FUNCTIONS ----
 
 async def get_global_stats(server_id: str) -> dict:
     async with aiosqlite.connect(DB_FILE) as db:
@@ -226,43 +218,30 @@ async def get_global_stats(server_id: str) -> dict:
 async def get_top_authors(server_id: str, limit: int = 5) -> list:
     async with aiosqlite.connect(DB_FILE) as db:
         db.row_factory = dict_factory
-        query = "SELECT author_user_id, author_name, COUNT(*) as count FROM quotes WHERE server_id = ? AND (author_user_id IS NOT NULL OR author_name IS NOT NULL) GROUP BY COALESCE(author_user_id, author_name) ORDER BY count DESC LIMIT ?"
+        query = """
+            SELECT author_user_id, author_name, COUNT(*) as count 
+            FROM quotes 
+            WHERE server_id = ? AND (author_user_id IS NOT NULL OR author_name IS NOT NULL)
+            GROUP BY COALESCE(author_user_id, author_name)
+            ORDER BY count DESC 
+            LIMIT ?
+        """
         async with db.execute(query, (server_id, limit)) as cursor:
             return await cursor.fetchall()
 
 async def get_top_submitters(server_id: str, limit: int = 5) -> list:
     async with aiosqlite.connect(DB_FILE) as db:
         db.row_factory = dict_factory
-        query = "SELECT added_by_user_id, COUNT(*) as count FROM quotes WHERE server_id = ? GROUP BY added_by_user_id ORDER BY count DESC LIMIT ?"
+        query = """
+            SELECT added_by_user_id, COUNT(*) as count 
+            FROM quotes 
+            WHERE server_id = ? 
+            GROUP BY added_by_user_id 
+            ORDER BY count DESC 
+            LIMIT ?
+        """
         async with db.execute(query, (server_id, limit)) as cursor:
             return await cursor.fetchall()
-
-async def log_audit(server_id: str, quote_id: int, action: str, user_id: str, old_value: str = None, new_value: str = None):
-    timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("""
-            INSERT INTO audit_log (server_id, quote_id, action, user_id, old_value, new_value, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (server_id, quote_id, action, user_id, old_value, new_value, timestamp))
-        await db.commit()
-
-
-async def get_audit_log(server_id: str, quote_id: int = None, limit: int = 10) -> list:
-    async with aiosqlite.connect(DB_FILE) as db:
-        db.row_factory = dict_factory
-        if quote_id:
-            async with db.execute(
-                "SELECT * FROM audit_log WHERE server_id = ? AND quote_id = ? ORDER BY id DESC LIMIT ?",
-                (server_id, quote_id, limit)
-            ) as cursor:
-                return await cursor.fetchall()
-        else:
-            async with db.execute(
-                "SELECT * FROM audit_log WHERE server_id = ? ORDER BY id DESC LIMIT ?",
-                (server_id, limit)
-            ) as cursor:
-                return await cursor.fetchall()
-
 
 async def get_user_stats(server_id: str, user_id: str) -> dict:
     async with aiosqlite.connect(DB_FILE) as db:
@@ -270,13 +249,71 @@ async def get_user_stats(server_id: str, user_id: str) -> dict:
             quoted_count = (await cursor.fetchone())[0]
         async with db.execute("SELECT COUNT(*) FROM quotes WHERE server_id = ? AND added_by_user_id = ?", (server_id, user_id)) as cursor:
             submitted_count = (await cursor.fetchone())[0]
-        author_rank_query = "SELECT COUNT(*) + 1 FROM (SELECT COUNT(*) as c FROM quotes WHERE server_id = ? AND author_user_id IS NOT NULL GROUP BY author_user_id) WHERE c > ?"
+
+        author_rank_query = """
+            SELECT COUNT(*) + 1 FROM (
+                SELECT COUNT(*) as c FROM quotes WHERE server_id = ? AND author_user_id IS NOT NULL GROUP BY author_user_id
+            ) WHERE c > ?
+        """
         async with db.execute(author_rank_query, (server_id, quoted_count)) as cursor:
             author_rank = (await cursor.fetchone())[0] if quoted_count > 0 else 0
-        submitter_rank_query = "SELECT COUNT(*) + 1 FROM (SELECT COUNT(*) as c FROM quotes WHERE server_id = ? GROUP BY added_by_user_id) WHERE c > ?"
+
+        submitter_rank_query = """
+            SELECT COUNT(*) + 1 FROM (
+                SELECT COUNT(*) as c FROM quotes WHERE server_id = ? GROUP BY added_by_user_id
+            ) WHERE c > ?
+        """
         async with db.execute(submitter_rank_query, (server_id, submitted_count)) as cursor:
             submitter_rank = (await cursor.fetchone())[0] if submitted_count > 0 else 0
+
         return {
-            "quoted_count": quoted_count, "submitted_count": submitted_count,
-            "author_rank": author_rank, "submitter_rank": submitter_rank
+            "quoted_count": quoted_count,
+            "submitted_count": submitted_count,
+            "author_rank": author_rank,
+            "submitter_rank": submitter_rank
         }
+
+# ---- NEW: FAVORITES FUNCTIONS ----
+
+async def add_favorite(server_id: str, quote_id: int, user_id: str):
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("INSERT OR IGNORE INTO favorites (server_id, quote_id, user_id) VALUES (?, ?, ?)", (server_id, quote_id, user_id))
+        await db.commit()
+
+async def remove_favorite(server_id: str, quote_id: int, user_id: str):
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("DELETE FROM favorites WHERE server_id = ? AND quote_id = ? AND user_id = ?", (server_id, quote_id, user_id))
+        await db.commit()
+
+async def count_user_favorites(server_id: str, user_id: str) -> int:
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT COUNT(*) FROM favorites WHERE server_id = ? AND user_id = ?", (server_id, user_id)) as cursor:
+            row = await cursor.fetchone()
+            return row[0]
+
+async def get_user_favorites_page(server_id: str, user_id: str, page: int) -> list:
+    query = """
+        SELECT q.* FROM quotes q
+        JOIN favorites f ON q.server_id = f.server_id AND q.quote_id = f.quote_id
+        WHERE f.server_id = ? AND f.user_id = ?
+        ORDER BY f.quote_id DESC LIMIT ? OFFSET ?
+    """
+    async with aiosqlite.connect(DB_FILE) as db:
+        db.row_factory = dict_factory
+        async with db.execute(query, (server_id, user_id, QUOTES_PER_PAGE, page * QUOTES_PER_PAGE)) as cursor:
+            return await cursor.fetchall()
+
+async def get_top_favorited_quotes(server_id: str, limit: int = 3) -> list:
+    query = """
+        SELECT q.quote_id, q.quote_text, q.author_user_id, q.author_name, COUNT(f.user_id) as fav_count
+        FROM quotes q
+        JOIN favorites f ON q.server_id = f.server_id AND q.quote_id = f.quote_id
+        WHERE q.server_id = ?
+        GROUP BY q.quote_id
+        ORDER BY fav_count DESC, q.quote_id DESC
+        LIMIT ?
+    """
+    async with aiosqlite.connect(DB_FILE) as db:
+        db.row_factory = dict_factory
+        async with db.execute(query, (server_id, limit)) as cursor:
+            return await cursor.fetchall()

@@ -1,20 +1,21 @@
 import os
+import re
 import random
 import logging
 import traceback
 import discord
 from datetime import datetime, timezone
 from discord import app_commands
-from discord.ext import commands, tasks # NEW: Added 'tasks'
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 from database import (
     init_db, close_db, add_quote, remove_quote, edit_quote, get_quote,
     get_random_quote, count_quotes_by_author, get_quotes_by_author_page,
-    count_search_quotes, search_quotes_page, get_unique_author_names,
-    check_quote_by_message_id, count_server_quotes, get_global_stats,
-    get_top_authors, get_top_submitters, get_user_stats,
-    log_audit, get_audit_log, QUOTES_PER_PAGE,
+    count_search_quotes, search_quotes_page, get_unique_author_names, 
+    check_quote_by_message_id, get_global_stats, get_top_authors, 
+    get_top_submitters, get_user_stats, add_favorite, remove_favorite, 
+    count_user_favorites, get_user_favorites_page, get_top_favorited_quotes, QUOTES_PER_PAGE,
 )
 from paginator import PaginatorView, build_page_embed
 
@@ -24,7 +25,8 @@ logger = logging.getLogger("quote_bot")
 
 QUOTE_MAX_LENGTH = 1000
 REACTION_EMOJI = "🗣️"
-APPROVED_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "◀️", "❌", "▶️", "✅", REACTION_EMOJI]
+FAVORITE_EMOJI = "⭐"
+APPROVED_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "◀️", "❌", "▶️", REACTION_EMOJI, FAVORITE_EMOJI]
 
 intents = discord.Intents.default()
 intents.members = True
@@ -34,31 +36,12 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ---- Helpers & UI Views ----
 
-# Pleasant fallback palette when no role color is available
-_FALLBACK_COLORS = [
-    0x5865F2,  # Blurple
-    0xEB459E,  # Fuchsia
-    0x57F287,  # Green
-    0xFEE75C,  # Yellow
-    0xED4245,  # Red
-    0x3498DB,  # Blue
-    0xE67E22,  # Orange
-    0x9B59B6,  # Purple
-    0x1ABC9C,  # Teal
-    0xE91E63,  # Pink
-    0x2ECC71,  # Emerald
-    0xF39C12,  # Amber
-]
-
-
 def get_embed_color(guild: discord.Guild | None, quote: dict) -> discord.Color:
     if guild and quote.get("author_user_id"):
         member = guild.get_member(int(quote["author_user_id"]))
         if member and member.top_role.color.value != 0:
             return member.top_role.color
-    # Seed by author identity so the same author always gets the same fallback color
-    seed = quote.get("author_user_id") or quote.get("author_name") or ""
-    return discord.Color(_FALLBACK_COLORS[hash(seed) % len(_FALLBACK_COLORS)])
+    return discord.Color.from_rgb(random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
 
 
 def format_single_quote_embed(quote: dict, guild: discord.Guild | None = None) -> discord.Embed:
@@ -70,15 +53,15 @@ def format_single_quote_embed(quote: dict, guild: discord.Guild | None = None) -
 
     ts_plain = quote["timestamp"]
     parsed_dt = None
-    try:
-        dt = datetime.fromisoformat(ts_plain)
-        parsed_dt = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-    except ValueError:
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
         try:
-            dt = datetime.strptime(ts_plain, "%Y-%m-%d %H:%M:%S")
-            parsed_dt = dt.replace(tzinfo=timezone.utc)
+            dt = datetime.strptime(ts_plain, fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            parsed_dt = dt
+            break
         except ValueError:
-            pass
+            continue
 
     embed = discord.Embed(
         description=f"> {quote['quote_text']}\n> \n> ***\u2014*** {author_mention}",
@@ -132,14 +115,8 @@ class ConfirmRemoveView(discord.ui.View):
         if interaction.user.id != self.author_id:
             return await interaction.response.send_message("Only the command user can confirm this.", ephemeral=True)
             
-        server_id = str(interaction.guild_id)
-        await log_audit(
-            server_id, self.quote["quote_id"], "delete",
-            str(interaction.user.id),
-            old_value=self.quote["quote_text"],
-        )
-        await remove_quote(server_id, self.quote["quote_id"])
-
+        await remove_quote(str(interaction.guild_id), self.quote["quote_id"])
+        
         for child in self.children:
             child.disabled = True
             
@@ -164,7 +141,7 @@ async def author_autocomplete(interaction: discord.Interaction, current: str) ->
     return [app_commands.Choice(name=name, value=name) for name in names]
 
 
-# ---- NEW: Background Tasks ----
+# ---- Background Tasks ----
 
 @tasks.loop(minutes=10)
 async def update_status():
@@ -172,21 +149,17 @@ async def update_status():
     await bot.wait_until_ready()
     
     try:
-        # Tally up all quotes across all servers the bot is in
         total_quotes = 0
         for guild in bot.guilds:
             stats = await get_global_stats(str(guild.id))
             total_quotes += stats.get('total_quotes', 0)
 
-        # A mix of static and dynamic statuses
         activities = [
             discord.Activity(type=discord.ActivityType.playing, name="with /qstats"),
             discord.Activity(type=discord.ActivityType.listening, name="to server lore"),
             discord.Activity(type=discord.ActivityType.watching, name="for 🗣️ reactions"),
             discord.Activity(type=discord.ActivityType.watching, name=f"{total_quotes} quotes in the vault")
         ]
-
-        # Pick one at random and apply it
         await bot.change_presence(activity=random.choice(activities))
     except Exception as e:
         logger.error(f"Failed to update bot status: {e}")
@@ -198,7 +171,6 @@ async def update_status():
 async def on_ready():
     await init_db()
     
-    # NEW: Start the background status loop
     if not update_status.is_running():
         update_status.start()
         
@@ -215,14 +187,6 @@ async def on_close():
 
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.CommandOnCooldown):
-        msg = f"Slow down! Try again in {error.retry_after:.0f}s."
-        if interaction.response.is_done():
-            await interaction.followup.send(msg, ephemeral=True)
-        else:
-            await interaction.response.send_message(msg, ephemeral=True)
-        return
-
     logger.error("Command /%s failed: %s", interaction.command.name if interaction.command else "unknown", error)
     traceback.print_exception(type(error), error, error.__traceback__)
     message = "Something went wrong. Try again in a moment."
@@ -232,7 +196,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         await interaction.response.send_message(message, ephemeral=True)
 
 
-# ---- Reaction Event ----
+# ---- Reaction Events ----
 
 @bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
@@ -248,6 +212,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     except (discord.NotFound, discord.Forbidden):
         return
 
+    # Filter unauthorized manual reactions on the Bot's own messages
     if message.author.id == bot.user.id:
         if str(payload.emoji) not in APPROVED_EMOJIS:
             try:
@@ -255,8 +220,17 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
                 await message.remove_reaction(payload.emoji, user)
             except discord.Forbidden:
                 pass 
-        return 
+            return 
+            
+        # NEW: Handle saving a favorite!
+        if str(payload.emoji) == FAVORITE_EMOJI:
+            if message.embeds and message.embeds[0].author and message.embeds[0].author.name:
+                match = re.search(r"Quote #(\d+)", message.embeds[0].author.name)
+                if match:
+                    await add_favorite(str(payload.guild_id), int(match.group(1)), str(payload.user_id))
+            return
 
+    # Handle saving new quotes from other messages
     if not payload.guild_id or str(payload.emoji) != REACTION_EMOJI:
         return
 
@@ -265,11 +239,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     
     is_duplicate = await check_quote_by_message_id(server_id, message_id)
     if is_duplicate:
-        try:
-            await message.add_reaction("✅")
-        except discord.Forbidden:
-            pass
-        return
+        return 
 
     if message.author.bot:
         return
@@ -295,12 +265,6 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         image_url=image_url,
         original_message_id=message_id
     )
-    await log_audit(server_id, quote_id, "add", str(payload.user_id), new_value=text or "[Image Only]")
-
-    try:
-        await message.add_reaction("✅")
-    except discord.Forbidden:
-        pass
 
     embed = discord.Embed(
         description=f"> {text or '[Image Only]'}\n> \n> ***\u2014*** {message.author.mention}",
@@ -311,13 +275,34 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     embed.set_thumbnail(url=message.author.display_avatar.url)
     if image_url:
         embed.set_image(url=image_url)
-    total = await count_server_quotes(server_id)
-    embed.set_footer(text=f"Added by {added_by_name} · {total} quotes in server")
-
+    embed.set_footer(text=f"Added by {added_by_name}")
+    
     try:
         await channel.send(embed=embed, reference=message)
     except discord.Forbidden:
         pass
+
+
+@bot.event
+async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
+    """NEW: Listener to remove a favorite if a user un-clicks the ⭐ reaction."""
+    if payload.user_id == bot.user.id:
+        return
+
+    if str(payload.emoji) == FAVORITE_EMOJI:
+        channel = bot.get_channel(payload.channel_id)
+        if not channel:
+            return
+            
+        try:
+            message = await channel.fetch_message(payload.message_id)
+        except (discord.NotFound, discord.Forbidden):
+            return
+
+        if message.author.id == bot.user.id and message.embeds and message.embeds[0].author and message.embeds[0].author.name:
+            match = re.search(r"Quote #(\d+)", message.embeds[0].author.name)
+            if match:
+                await remove_favorite(str(payload.guild_id), int(match.group(1)), str(payload.user_id))
 
 
 # ---- Commands ----
@@ -352,7 +337,6 @@ async def save_quote_context(interaction: discord.Interaction, message: discord.
         image_url=image_url,
         original_message_id=message_id
     )
-    await log_audit(server_id, quote_id, "add", str(interaction.user.id), new_value=text or "[Image Only]")
 
     embed = discord.Embed(
         description=f"> {text or '[Image Only]'}\n> \n> ***\u2014*** {message.author.mention}",
@@ -363,8 +347,7 @@ async def save_quote_context(interaction: discord.Interaction, message: discord.
     embed.set_thumbnail(url=message.author.display_avatar.url)
     if image_url:
         embed.set_image(url=image_url)
-    total = await count_server_quotes(server_id)
-    embed.set_footer(text=f"Added by {interaction.user.display_name} · {total} quotes in server")
+    embed.set_footer(text=f"Added by {interaction.user.display_name}")
     
     await interaction.response.send_message(embed=embed)
 
@@ -376,7 +359,6 @@ async def save_quote_context(interaction: discord.Interaction, message: discord.
     author_text="The name of the author (for non-Discord users)",
     attachment="An optional image to attach to the quote"
 )
-@app_commands.checks.cooldown(1, 5.0)
 @app_commands.autocomplete(author_text=author_autocomplete)
 @app_commands.guild_only()
 async def qadd(
@@ -389,25 +371,19 @@ async def qadd(
     if author_user and author_text:
         return await interaction.response.send_message("Please provide either `author_user` or `author_text`, not both.", ephemeral=True)
 
-    text = text.strip()
-    if not text:
-        return await interaction.response.send_message("Quote text cannot be empty or whitespace.", ephemeral=True)
-
     if len(text) > QUOTE_MAX_LENGTH:
         return await interaction.response.send_message(f"Quote text must be {QUOTE_MAX_LENGTH} characters or fewer.", ephemeral=True)
 
     image_url = attachment.url if attachment else None
 
-    server_id = str(interaction.guild_id)
     quote_id = await add_quote(
-        server_id=server_id,
+        server_id=str(interaction.guild_id),
         quote_text=text,
         added_by_user_id=str(interaction.user.id),
         author_user_id=str(author_user.id) if author_user else None,
         author_name=author_text,
         image_url=image_url
     )
-    await log_audit(server_id, quote_id, "add", str(interaction.user.id), new_value=text)
 
     author_display = author_user.mention if author_user else author_text or "Unknown"
 
@@ -417,20 +393,18 @@ async def qadd(
         timestamp=datetime.now(timezone.utc),
     )
     embed.set_author(name=f"Quote #{quote_id} Added")
-
+    
     if image_url:
         embed.set_image(url=image_url)
     if author_user:
         embed.set_thumbnail(url=author_user.display_avatar.url)
-
-    total = await count_server_quotes(server_id)
-    embed.set_footer(text=f"Added by {interaction.user.display_name} · {total} quotes in server")
+        
+    embed.set_footer(text=f"Added by {interaction.user.display_name}")
     await interaction.response.send_message(embed=embed)
 
 
 @bot.tree.command(name="qremove", description="Remove a quote by ID")
 @app_commands.describe(id="The quote ID to remove")
-@app_commands.checks.cooldown(1, 5.0)
 @app_commands.guild_only()
 async def qremove(interaction: discord.Interaction, id: int):
     quote = await get_quote(str(interaction.guild_id), id)
@@ -459,7 +433,6 @@ async def qremove(interaction: discord.Interaction, id: int):
     author_text="New text author name",
     attachment="New image attachment (overwrites existing)"
 )
-@app_commands.checks.cooldown(1, 5.0)
 @app_commands.autocomplete(author_text=author_autocomplete)
 @app_commands.guild_only()
 async def qedit(
@@ -472,11 +445,6 @@ async def qedit(
 ):
     if author_user and author_text:
         return await interaction.response.send_message("Please provide either `author_user` or `author_text`, not both.", ephemeral=True)
-
-    if text is not None:
-        text = text.strip()
-        if not text:
-            return await interaction.response.send_message("Quote text cannot be empty or whitespace.", ephemeral=True)
 
     if text is not None and len(text) > QUOTE_MAX_LENGTH:
         return await interaction.response.send_message(f"Quote text must be {QUOTE_MAX_LENGTH} characters or fewer.", ephemeral=True)
@@ -493,20 +461,13 @@ async def qedit(
 
     image_url = attachment.url if attachment else None
 
-    server_id = str(interaction.guild_id)
     updated = await edit_quote(
-        server_id=server_id,
+        server_id=str(interaction.guild_id),
         quote_id=id,
         quote_text=text,
         author_user_id=str(author_user.id) if author_user else None,
         author_name=author_text,
         image_url=image_url
-    )
-    await log_audit(
-        server_id, id, "edit",
-        str(interaction.user.id),
-        old_value=quote["quote_text"],
-        new_value=updated["quote_text"],
     )
     embed = format_single_quote_embed(updated, interaction.guild)
     embed.set_author(name=f"Quote #{id} Updated")
@@ -626,6 +587,36 @@ async def qsearch(interaction: discord.Interaction, keyword: str):
     await interaction.response.send_message(embed=embed, view=view)
 
 
+# ---- NEW: /qfavorites COMMAND ----
+
+@bot.tree.command(name="qfavorites", description="View your personally saved favorite quotes")
+@app_commands.guild_only()
+async def qfavorites(interaction: discord.Interaction):
+    server_id = str(interaction.guild_id)
+    user_id = str(interaction.user.id)
+    
+    total = await count_user_favorites(server_id, user_id)
+    if total == 0:
+        return await interaction.response.send_message("You haven't favorited any quotes yet! React with ⭐ on any quote embed to save it.", ephemeral=True)
+        
+    title = f"⭐ Favorites for {interaction.user.display_name}"
+    first_page = await get_user_favorites_page(server_id, user_id, 0)
+    embed = build_page_embed(first_page, 0, total, title)
+    
+    async def fetch_page(page: int) -> list[dict]:
+        return await get_user_favorites_page(server_id, user_id, page)
+        
+    view = PaginatorView(
+        fetch_page=fetch_page,
+        total=total,
+        title=title,
+        author_id=interaction.user.id,
+        format_single_embed=lambda q: format_single_quote_embed(q, interaction.guild),
+        first_page_quotes=first_page
+    )
+    await interaction.response.send_message(embed=embed, view=view)
+
+
 @bot.tree.command(name="qstats", description="View server quote statistics and leaderboards")
 @app_commands.describe(user="Optional: View personal stats for a specific user")
 @app_commands.guild_only()
@@ -634,6 +625,8 @@ async def qstats(interaction: discord.Interaction, user: discord.User | None = N
     
     if user:
         stats = await get_user_stats(server_id, str(user.id))
+        fav_count = await count_user_favorites(server_id, str(user.id)) # NEW: User fav count
+        
         embed = discord.Embed(title=f"📊 Stats for {user.display_name}", color=discord.Color.blue())
         
         if user.avatar:
@@ -644,6 +637,7 @@ async def qstats(interaction: discord.Interaction, user: discord.User | None = N
         
         embed.add_field(name="🗣️ Times Quoted", value=f"**{stats['quoted_count']}**\nServer Rank: {auth_rank_str}", inline=True)
         embed.add_field(name="📝 Quotes Saved", value=f"**{stats['submitted_count']}**\nServer Rank: {sub_rank_str}", inline=True)
+        embed.add_field(name="⭐ Favorites Saved", value=f"**{fav_count}**", inline=True)
         
         await interaction.response.send_message(embed=embed)
         
@@ -651,6 +645,7 @@ async def qstats(interaction: discord.Interaction, user: discord.User | None = N
         global_stats = await get_global_stats(server_id)
         top_authors = await get_top_authors(server_id, 5)
         top_submitters = await get_top_submitters(server_id, 5)
+        top_favorited = await get_top_favorited_quotes(server_id, 3) # NEW: Top 3 favorited quotes
         
         embed = discord.Embed(title="🏆 Server Quote Leaderboard", color=discord.Color.gold())
         if interaction.guild.icon:
@@ -680,55 +675,19 @@ async def qstats(interaction: discord.Interaction, user: discord.User | None = N
             submitters_text = "No one has saved a quote."
         embed.add_field(name="🕵️ Top Quote Hunters", value=submitters_text, inline=True)
         
+        # NEW: Render the top favorited quotes
+        fav_text = ""
+        for i, row in enumerate(top_favorited):
+            name = f"<@{row['author_user_id']}>" if row['author_user_id'] else row['author_name']
+            clean_text = row['quote_text'].replace('\n', ' ')
+            snippet = clean_text[:40] + "..." if len(clean_text) > 40 else clean_text
+            fav_text += f"{medals[i]} **#{row['quote_id']}** ({row['fav_count']} ⭐)\n> *\"{snippet}\"* — {name}\n"
+            
+        if not fav_text:
+            fav_text = "No quotes have been favorited yet."
+        embed.add_field(name="⭐ Most Favorited Quotes", value=fav_text, inline=False)
+        
         await interaction.response.send_message(embed=embed)
-
-
-@bot.tree.command(name="qlog", description="[ADMIN] View the audit log of quote edits and deletions")
-@app_commands.describe(id="Optional: Filter by quote ID")
-@app_commands.default_permissions(manage_messages=True)
-@app_commands.guild_only()
-async def qlog(interaction: discord.Interaction, id: int | None = None):
-    server_id = str(interaction.guild_id)
-    entries = await get_audit_log(server_id, quote_id=id)
-
-    if not entries:
-        return await interaction.response.send_message("No audit log entries found.", ephemeral=True)
-
-    lines = []
-    for entry in entries:
-        try:
-            dt = datetime.fromisoformat(entry["timestamp"])
-            ts = f"<t:{int(dt.timestamp())}:R>"
-        except ValueError:
-            ts = entry["timestamp"]
-
-        action = entry["action"].upper()
-        user = f"<@{entry['user_id']}>"
-        qid = entry["quote_id"]
-
-        if entry["action"] == "add":
-            val = (entry.get("new_value") or "")[:80]
-            detail = f"Text: *{val}{'...' if len(entry.get('new_value', '') or '') > 80 else ''}*"
-        elif entry["action"] == "delete":
-            val = (entry.get("old_value") or "")[:80]
-            detail = f"Text: *{val}{'...' if len(entry.get('old_value', '') or '') > 80 else ''}*"
-        elif entry["action"] == "edit":
-            old = (entry.get("old_value") or "")[:60]
-            new = (entry.get("new_value") or "")[:60]
-            detail = f"`{old}` → `{new}`"
-        else:
-            detail = ""
-
-        lines.append(f"{ts} **{action}** Quote #{qid} by {user}\n{detail}")
-
-    title = f"Audit Log — Quote #{id}" if id else "Audit Log (Recent)"
-    embed = discord.Embed(
-        title=title,
-        description="\n\n".join(lines),
-        color=discord.Color.dark_grey(),
-    )
-    embed.set_footer(text=f"Showing {len(entries)} entries")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="qhelp", description="Show help for the quote bot")
@@ -741,6 +700,7 @@ async def qhelp(interaction: discord.Interaction):
     commands_info = [
         ("Reaction Save", "React to any message with 🗣️ to instantly save it as a quote."),
         ("Right-Click Save", "Right-click any message -> Apps -> `Save Quote` to instantly save it."),
+        ("⭐ Personal Favorites", "React to any bot quote embed with ⭐ to bookmark it to your personal list!"),
         ("/qadd", "`text` `[author_user]` `[author_text]` `[attachment]`\nAdd a new quote manually. Supports image uploads."),
         ("/qremove", "`id`\nRemove a quote safely with a confirmation prompt."),
         ("/qedit", "`id` `[text]` `[author_user]` `[author_text]` `[attachment]`\nEdit a quote's text, author, or image."),
@@ -749,7 +709,7 @@ async def qhelp(interaction: discord.Interaction):
         ("/quser", "`[author_user]` `[author_text]`\nGet all quotes by an author. Features text autocomplete."),
         ("/qsearch", "`keyword`\nSearch quotes by keyword (paginated)."),
         ("/qstats", "`[user]`\nView the global server leaderboard or a specific user's stats."),
-        ("/qlog", "`[id]`\n[Manage Messages] View audit log of quote edits and deletions."),
+        ("/qfavorites", "View a paginated list of your personally starred quotes."),
     ]
     for name, value in commands_info:
         embed.add_field(name=name, value=value, inline=False)
