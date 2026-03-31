@@ -295,6 +295,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         image_url=image_url,
         original_message_id=message_id
     )
+    await log_audit(server_id, quote_id, "add", str(payload.user_id), new_value=text or "[Image Only]")
 
     try:
         await message.add_reaction("✅")
@@ -351,6 +352,7 @@ async def save_quote_context(interaction: discord.Interaction, message: discord.
         image_url=image_url,
         original_message_id=message_id
     )
+    await log_audit(server_id, quote_id, "add", str(interaction.user.id), new_value=text or "[Image Only]")
 
     embed = discord.Embed(
         description=f"> {text or '[Image Only]'}\n> \n> ***\u2014*** {message.author.mention}",
@@ -396,14 +398,16 @@ async def qadd(
 
     image_url = attachment.url if attachment else None
 
+    server_id = str(interaction.guild_id)
     quote_id = await add_quote(
-        server_id=str(interaction.guild_id),
+        server_id=server_id,
         quote_text=text,
         added_by_user_id=str(interaction.user.id),
         author_user_id=str(author_user.id) if author_user else None,
         author_name=author_text,
         image_url=image_url
     )
+    await log_audit(server_id, quote_id, "add", str(interaction.user.id), new_value=text)
 
     author_display = author_user.mention if author_user else author_text or "Unknown"
 
@@ -419,7 +423,7 @@ async def qadd(
     if author_user:
         embed.set_thumbnail(url=author_user.display_avatar.url)
 
-    total = await count_server_quotes(str(interaction.guild_id))
+    total = await count_server_quotes(server_id)
     embed.set_footer(text=f"Added by {interaction.user.display_name} · {total} quotes in server")
     await interaction.response.send_message(embed=embed)
 
@@ -702,8 +706,12 @@ async def qlog(interaction: discord.Interaction, id: int | None = None):
         user = f"<@{entry['user_id']}>"
         qid = entry["quote_id"]
 
-        if entry["action"] == "delete":
-            detail = f"Text: *{entry['old_value'][:80]}{'...' if len(entry.get('old_value', '') or '') > 80 else ''}*"
+        if entry["action"] == "add":
+            val = (entry.get("new_value") or "")[:80]
+            detail = f"Text: *{val}{'...' if len(entry.get('new_value', '') or '') > 80 else ''}*"
+        elif entry["action"] == "delete":
+            val = (entry.get("old_value") or "")[:80]
+            detail = f"Text: *{val}{'...' if len(entry.get('old_value', '') or '') > 80 else ''}*"
         elif entry["action"] == "edit":
             old = (entry.get("old_value") or "")[:60]
             new = (entry.get("new_value") or "")[:60]

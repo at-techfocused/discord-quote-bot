@@ -247,7 +247,7 @@ async def log_audit(server_id: str, quote_id: int, action: str, user_id: str, ol
         await db.commit()
 
 
-async def get_audit_log(server_id: str, quote_id: int = None, limit: int = 15) -> list:
+async def get_audit_log(server_id: str, quote_id: int = None, limit: int = 10) -> list:
     async with aiosqlite.connect(DB_FILE) as db:
         db.row_factory = dict_factory
         if quote_id:
