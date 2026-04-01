@@ -15,7 +15,8 @@ from database import (
     count_search_quotes, search_quotes_page, get_unique_author_names, 
     check_quote_by_message_id, get_global_stats, get_top_authors, 
     get_top_submitters, get_user_stats, add_favorite, remove_favorite, 
-    count_user_favorites, get_user_favorites_page, get_top_favorited_quotes, QUOTES_PER_PAGE,
+    count_user_favorites, get_user_favorites_page, get_top_favorited_quotes, 
+    swap_quotes, QUOTES_PER_PAGE, # NEW: Imported swap_quotes
 )
 from paginator import PaginatorView, build_page_embed
 
@@ -43,6 +44,20 @@ def get_embed_color(guild: discord.Guild | None, quote: dict) -> discord.Color:
             return member.top_role.color
     return discord.Color.from_rgb(random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
 
+# 4. DRY EMBEDS: Shared helper function for add-confirmation blocks
+def build_add_confirmation_embed(quote_id: int, text: str, author_mention: str, added_by_name: str, avatar_url: str = None, image_url: str = None, method: str = "Added") -> discord.Embed:
+    embed = discord.Embed(
+        description=f"> {text or '[Image Only]'}\n> \n> ***\u2014*** {author_mention}",
+        color=discord.Color.green(),
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.set_author(name=f"Quote #{quote_id} {method}")
+    if avatar_url:
+        embed.set_thumbnail(url=avatar_url)
+    if image_url:
+        embed.set_image(url=image_url)
+    embed.set_footer(text=f"Added by {added_by_name}")
+    return embed
 
 def format_single_quote_embed(quote: dict, guild: discord.Guild | None = None) -> discord.Embed:
     author_mention = (
@@ -145,9 +160,7 @@ async def author_autocomplete(interaction: discord.Interaction, current: str) ->
 
 @tasks.loop(minutes=10)
 async def update_status():
-    """Background loop that updates the bot's rich presence every 10 minutes."""
     await bot.wait_until_ready()
-    
     try:
         total_quotes = 0
         for guild in bot.guilds:
@@ -212,7 +225,6 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     except (discord.NotFound, discord.Forbidden):
         return
 
-    # Filter unauthorized manual reactions on the Bot's own messages
     if message.author.id == bot.user.id:
         if str(payload.emoji) not in APPROVED_EMOJIS:
             try:
@@ -222,7 +234,6 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
                 pass 
             return 
             
-        # NEW: Handle saving a favorite!
         if str(payload.emoji) == FAVORITE_EMOJI:
             if message.embeds and message.embeds[0].author and message.embeds[0].author.name:
                 match = re.search(r"Quote #(\d+)", message.embeds[0].author.name)
@@ -230,7 +241,6 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
                     await add_favorite(str(payload.guild_id), int(match.group(1)), str(payload.user_id))
             return
 
-    # Handle saving new quotes from other messages
     if not payload.guild_id or str(payload.emoji) != REACTION_EMOJI:
         return
 
@@ -266,16 +276,15 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         original_message_id=message_id
     )
 
-    embed = discord.Embed(
-        description=f"> {text or '[Image Only]'}\n> \n> ***\u2014*** {message.author.mention}",
-        color=discord.Color.green(),
-        timestamp=datetime.now(timezone.utc),
+    embed = build_add_confirmation_embed(
+        quote_id=quote_id,
+        text=text,
+        author_mention=message.author.mention,
+        added_by_name=added_by_name,
+        avatar_url=message.author.display_avatar.url,
+        image_url=image_url,
+        method="Added via Reaction"
     )
-    embed.set_author(name=f"Quote #{quote_id} Added via Reaction")
-    embed.set_thumbnail(url=message.author.display_avatar.url)
-    if image_url:
-        embed.set_image(url=image_url)
-    embed.set_footer(text=f"Added by {added_by_name}")
     
     try:
         await channel.send(embed=embed, reference=message)
@@ -285,7 +294,6 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
 
 @bot.event
 async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
-    """NEW: Listener to remove a favorite if a user un-clicks the ⭐ reaction."""
     if payload.user_id == bot.user.id:
         return
 
@@ -338,16 +346,15 @@ async def save_quote_context(interaction: discord.Interaction, message: discord.
         original_message_id=message_id
     )
 
-    embed = discord.Embed(
-        description=f"> {text or '[Image Only]'}\n> \n> ***\u2014*** {message.author.mention}",
-        color=discord.Color.green(),
-        timestamp=datetime.now(timezone.utc),
+    embed = build_add_confirmation_embed(
+        quote_id=quote_id,
+        text=text,
+        author_mention=message.author.mention,
+        added_by_name=interaction.user.display_name,
+        avatar_url=message.author.display_avatar.url,
+        image_url=image_url,
+        method="Added via Context Menu"
     )
-    embed.set_author(name=f"Quote #{quote_id} Added via Context Menu")
-    embed.set_thumbnail(url=message.author.display_avatar.url)
-    if image_url:
-        embed.set_image(url=image_url)
-    embed.set_footer(text=f"Added by {interaction.user.display_name}")
     
     await interaction.response.send_message(embed=embed)
 
@@ -385,21 +392,19 @@ async def qadd(
         image_url=image_url
     )
 
-    author_display = author_user.mention if author_user else author_text or "Unknown"
+    author_mention = author_user.mention if author_user else author_text or "Unknown"
+    avatar_url = author_user.display_avatar.url if author_user else None
 
-    embed = discord.Embed(
-        description=f"> {text}\n> \n> ***\u2014*** {author_display}",
-        color=discord.Color.green(),
-        timestamp=datetime.now(timezone.utc),
+    embed = build_add_confirmation_embed(
+        quote_id=quote_id,
+        text=text,
+        author_mention=author_mention,
+        added_by_name=interaction.user.display_name,
+        avatar_url=avatar_url,
+        image_url=image_url,
+        method="Added"
     )
-    embed.set_author(name=f"Quote #{quote_id} Added")
     
-    if image_url:
-        embed.set_image(url=image_url)
-    if author_user:
-        embed.set_thumbnail(url=author_user.display_avatar.url)
-        
-    embed.set_footer(text=f"Added by {interaction.user.display_name}")
     await interaction.response.send_message(embed=embed)
 
 
@@ -587,8 +592,6 @@ async def qsearch(interaction: discord.Interaction, keyword: str):
     await interaction.response.send_message(embed=embed, view=view)
 
 
-# ---- NEW: /qfavorites COMMAND ----
-
 @bot.tree.command(name="qfavorites", description="View your personally saved favorite quotes")
 @app_commands.guild_only()
 async def qfavorites(interaction: discord.Interaction):
@@ -625,7 +628,7 @@ async def qstats(interaction: discord.Interaction, user: discord.User | None = N
     
     if user:
         stats = await get_user_stats(server_id, str(user.id))
-        fav_count = await count_user_favorites(server_id, str(user.id)) # NEW: User fav count
+        fav_count = await count_user_favorites(server_id, str(user.id))
         
         embed = discord.Embed(title=f"📊 Stats for {user.display_name}", color=discord.Color.blue())
         
@@ -645,7 +648,7 @@ async def qstats(interaction: discord.Interaction, user: discord.User | None = N
         global_stats = await get_global_stats(server_id)
         top_authors = await get_top_authors(server_id, 5)
         top_submitters = await get_top_submitters(server_id, 5)
-        top_favorited = await get_top_favorited_quotes(server_id, 3) # NEW: Top 3 favorited quotes
+        top_favorited = await get_top_favorited_quotes(server_id, 3)
         
         embed = discord.Embed(title="🏆 Server Quote Leaderboard", color=discord.Color.gold())
         if interaction.guild.icon:
@@ -675,7 +678,6 @@ async def qstats(interaction: discord.Interaction, user: discord.User | None = N
             submitters_text = "No one has saved a quote."
         embed.add_field(name="🕵️ Top Quote Hunters", value=submitters_text, inline=True)
         
-        # NEW: Render the top favorited quotes
         fav_text = ""
         for i, row in enumerate(top_favorited):
             name = f"<@{row['author_user_id']}>" if row['author_user_id'] else row['author_name']
@@ -723,25 +725,20 @@ async def qhelp(interaction: discord.Interaction):
 @app_commands.default_permissions(administrator=True)
 @app_commands.guild_only()
 async def qswap(interaction: discord.Interaction, id1: int, id2: int):
-    import aiosqlite
-    from database import DB_FILE 
-    
     server_id = str(interaction.guild_id)
-
-    from database import get_quote
+    
     q1 = await get_quote(server_id, id1)
     q2 = await get_quote(server_id, id2)
     
     if not q1 or not q2:
         return await interaction.response.send_message("❌ Cannot swap: One or both of those quote IDs do not exist.", ephemeral=True)
 
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("UPDATE quotes SET quote_id = 999999 WHERE server_id = ? AND quote_id = ?", (server_id, id1))
-        await db.execute("UPDATE quotes SET quote_id = ? WHERE server_id = ? AND quote_id = ?", (id1, server_id, id2))
-        await db.execute("UPDATE quotes SET quote_id = ? WHERE server_id = ? AND quote_id = 999999", (id2, server_id))
-        await db.commit()
+    success = await swap_quotes(server_id, id1, id2)
 
-    await interaction.response.send_message(f"✅ Successfully swapped **Quote #{id1}** and **Quote #{id2}**!", ephemeral=True)
+    if success:
+        await interaction.response.send_message(f"✅ Successfully swapped **Quote #{id1}** and **Quote #{id2}**!", ephemeral=True)
+    else:
+        await interaction.response.send_message("❌ Failed to swap quotes due to a database error.", ephemeral=True)
 
 
 def main():
